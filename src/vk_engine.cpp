@@ -10,6 +10,12 @@
 #include <chrono>
 #include <thread>
 
+inline void logKey(SDL_Scancode keyScanCode) {
+    const SDL_Keycode kcode = SDL_GetKeyFromScancode(keyScanCode);
+    const fmt::string_view asd = SDL_GetKeyName(kcode);
+    fmt::print("Key Event Received:   {0}\n", asd);
+}
+
 VulkanEngine* loadedEngine = nullptr;
 
 VulkanEngine& VulkanEngine::Get() { return *loadedEngine; }
@@ -71,6 +77,12 @@ void VulkanEngine::run()
                 }
                 if (e.window.event == SDL_WINDOWEVENT_RESTORED) {
                     stop_rendering = false;
+                }
+            }
+            if (e.type == SDL_KEYDOWN) {
+                logKey(e.key.keysym.scancode);
+                if (e.key.keysym.scancode == SDL_SCANCODE_ESCAPE) {
+                    bQuit = true;
                 }
             }
         }
