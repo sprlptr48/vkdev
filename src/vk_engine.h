@@ -8,11 +8,27 @@
 #define VK_DEBUG
 
 
+struct DeletionQueue    // TODO: use array or somn mabye idk this is ugly
+{
+    std::deque<std::function<void()>> deletors;
+    void push_function(std::function<void()>&& function) {
+        deletors.push_back(function);
+    }
+    void flush() {
+        // reverse iterate the deletion queue to execute all the functions
+        for (auto it = deletors.rbegin(); it != deletors.rend(); it++) {
+            (*it)(); //call functors
+        }
+        deletors.clear();
+    }
+};
+
 struct FrameData {
     VkCommandPool _commandPool;
     VkCommandBuffer _mainCommandBuffer;
     VkSemaphore _swapchainSemaphore, _renderSemaphore;
     VkFence _renderFence;
+    DeletionQueue _deletionQueue;
 };
 
 constexpr unsigned int FRAME_OVERLAP = 2;
@@ -25,8 +41,7 @@ public:
     bool stop_rendering{false};
     VkExtent2D _windowExtent{900, 550};
     struct SDL_Window *_window{nullptr};
-
-
+    DeletionQueue _mainDeletionQueue;
     VkInstance _instance;
     VkPhysicalDevice _chosenGPU;
     VkDevice _device;                          // Vulkan Device for commands
@@ -34,7 +49,6 @@ public:
     VkDebugUtilsMessengerEXT _debug_messenger; // Vulkan debug output handle
 #endif
     VkSurfaceKHR _surface;                     // Vulkan window surface
-
     VkSwapchainKHR _swapchain;
     VkFormat _swapchainImageFormat;
     std::vector<VkImage> _swapchainImages;
@@ -47,6 +61,10 @@ public:
     VkQueue _graphicsQueue;
     uint32_t _graphicsQueueFamily;
 
+    VmaAllocator _allocator;
+    //draw resources
+    AllocatedImage _drawImage;
+    VkExtent2D _drawExtent;
 
     static VulkanEngine &Get();
 
@@ -58,6 +76,8 @@ public:
 
     //draw loop
     void draw();
+    // additional draw stuff
+    void draw_background(VkCommandBuffer cmd);
 
     //run main loop
     void run();
