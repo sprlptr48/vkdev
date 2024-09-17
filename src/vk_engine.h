@@ -73,6 +73,11 @@ public:
     VkPipeline _gradientPipeline;
     VkPipelineLayout _gradientPipelineLayout;
 
+    VkFence _immFence;
+    VkCommandBuffer _immCommandBuffer;
+    VkCommandPool _immCommandPool;
+
+
     static VulkanEngine &Get();
 
     //initializes everything in the engine
@@ -89,6 +94,11 @@ public:
     //run main loop
     void run();
 
+    void immediate_submit(std::function<void(VkCommandBuffer cmd)>&& function);
+
+    void draw_imgui(VkCommandBuffer cmd, VkImageView targetView);
+
+
 private:
     void init_vulkan();
     void init_swapchain();
@@ -99,6 +109,7 @@ private:
     void init_desciptors();
     void init_pipelines();
     void init_background_pipelines();
+    void init_imgui();
 
 
 };
