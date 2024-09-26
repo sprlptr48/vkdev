@@ -1,4 +1,3 @@
-
 # Add source to this project's executable.
 add_executable (engine 
   main.cpp
@@ -18,6 +17,14 @@ add_executable (engine
   camera.cpp
   camera.h
 )
+
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  add_compile_options(-Wall -Wextra -Werror)
+  target_compile_options(engine PRIVATE -fno-exceptions)
+elseif(MSVC)
+  add_compile_options(/W4 /WX)
+  target_compile_options(engine PRIVATE /EHsc)
+endif()
 
 set_property(TARGET engine PROPERTY CXX_STANDARD 23)
 target_compile_definitions(engine PUBLIC GLM_FORCE_DEPTH_ZERO_TO_ONE)

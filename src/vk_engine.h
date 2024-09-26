@@ -99,6 +99,11 @@ public:
     int currentBackgroundEffect{0};
     float _dpiScale = 1.0;
 
+    VkPipelineLayout _trianglePipelineLayout;
+    VkPipeline _trianglePipeline;
+
+    void init_triangle_pipeline();
+
 
     static VulkanEngine &Get();
 
@@ -119,7 +124,7 @@ public:
     void immediate_submit(std::function<void(VkCommandBuffer cmd)>&& function);
 
     void draw_imgui(VkCommandBuffer cmd, VkImageView targetView);
-
+    void draw_geometry(VkCommandBuffer cmd);
 
 private:
     void init_vulkan();
