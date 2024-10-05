@@ -22,7 +22,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   add_compile_options(-Wall -Wextra -Werror)
   target_compile_options(engine PRIVATE -fno-exceptions)
 elseif(MSVC)
-  add_compile_options(/W4 /WX)
+  add_compile_options(/W4 /WX /Werror)
   target_compile_options(engine PRIVATE /EHsc)
 endif()
 

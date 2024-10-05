@@ -10,7 +10,8 @@ layout( push_constant ) uniform constants
  vec4 data1;
  vec4 data2;
  vec4 data3;
- vec4 data4;
+ vec3 data4;
+ uint time;
 } PushConstants;
 
 void main() 

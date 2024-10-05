@@ -4,8 +4,10 @@
 #pragma once
 
 #include <vk_types.h>
+#include <glm/fwd.hpp>
 
 #include "vk_descriptors.h"
+#include "vk_loader.h"
 
 #define VK_DEBUG
 
@@ -37,7 +39,8 @@ struct ComputePushConstants {
     glm::vec4 data1;
     glm::vec4 data2;
     glm::vec4 data3;
-    glm::vec4 data4;
+    glm::vec3 data4;
+    glm::uint32 time;
 };
 
 struct ComputeEffect {
@@ -102,6 +105,16 @@ public:
     VkPipelineLayout _trianglePipelineLayout;
     VkPipeline _trianglePipeline;
 
+    VkPipelineLayout _meshPipelineLayout;
+    VkPipeline _meshPipeline;
+
+    GPUMeshBuffers rectangle; // hardcoded rectangle buffer
+
+    std::vector<std::shared_ptr<MeshAsset>> _testMeshes;
+
+    void init_default_data();
+    void init_mesh_pipeline();
+
     void init_triangle_pipeline();
 
 
@@ -123,8 +136,12 @@ public:
 
     void immediate_submit(std::function<void(VkCommandBuffer cmd)>&& function);
 
-    void draw_imgui(VkCommandBuffer cmd, VkImageView targetView);
+    void draw_imgui(VkCommandBuffer cmd, VkImageView targetImageView);
     void draw_geometry(VkCommandBuffer cmd);
+
+    AllocatedBuffer create_buffer(size_t allocSize, VkBufferUsageFlags usage, VmaMemoryUsage memoryUsage);
+    void destroy_buffer(const AllocatedBuffer& buffer) const;
+    GPUMeshBuffers uploadMesh(std::span<uint32_t> indices, std::span<Vertex> vertices);
 
 private:
     void init_vulkan();

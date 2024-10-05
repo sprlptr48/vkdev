@@ -21,6 +21,8 @@
 #define VMA_IMPLEMENTATION
 #include <iostream>
 
+#include <glm/gtx/transform.hpp>
+
 #include "vk_mem_alloc.h"
 
 static inline void log_key(SDL_Scancode keyScanCode) {
@@ -51,7 +53,7 @@ void VulkanEngine::init() {
     // We initialize SDL and create a window with it.
     SDL_Init(SDL_INIT_VIDEO);
 
-    constexpr auto window_flags = static_cast<SDL_WindowFlags>(SDL_WINDOW_VULKAN);
+    constexpr SDL_WindowFlags window_flags = SDL_WINDOW_VULKAN;
     _window = SDL_CreateWindow(
             "Vulkan Engine",
             SDL_WINDOWPOS_UNDEFINED,
@@ -130,7 +132,7 @@ void VulkanEngine::draw()
     VK_CHECK(vkBeginCommandBuffer(cmd, &cmdBeginInfo));
     //TODO: Clear the following part.
 
-    // transition our main draw image into general layout so we can write into it
+    // transition our main draw image into general layout so we can write into it.
     // we will overwrite it all so we don't care about what was the older layout
     vkutil::transition_image(cmd, _drawImage.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
     draw_background(cmd);
@@ -217,6 +219,36 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd)
     //launch a draw command to draw 3 vertices
     vkCmdDraw(cmd, 3, 1, 0, 0);
 
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _meshPipeline);
+
+    GPUDrawPushConstants push_constants{};
+    //float time = glm::sin(SDL_GetTicks() / 1000.0f) + 1.0f;
+    //time = static_cast<float>(SDL_GetTicks());
+    push_constants.worldMatrix = glm::mat4{ 1.0f };
+    push_constants.vertexBuffer = rectangle.vertexBufferAddress;
+
+    vkCmdPushConstants(cmd, _meshPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(GPUDrawPushConstants), &push_constants);
+    vkCmdBindIndexBuffer(cmd, rectangle.indexBuffer.buffer, 0, VK_INDEX_TYPE_UINT32);
+
+    vkCmdDrawIndexed(cmd, 6, 1, 0, 0, 0);
+
+    //DRAW TEST MESH (basicmesh.glb)
+    glm::mat4 view = glm::translate(glm::vec3{ 0,0,-5 });
+    // camera projection
+    glm::mat4 projection = glm::perspective(glm::radians(70.f), (float)_drawExtent.width / (float)_drawExtent.height, 10000.f, 0.1f);
+
+    // invert the Y direction on projection matrix so that we are more similar
+    // to opengl and gltf axis
+    projection[1][1] *= -1;
+
+    push_constants.worldMatrix = projection * view;
+    push_constants.vertexBuffer = _testMeshes[2]->meshBuffers.vertexBufferAddress;
+
+    vkCmdPushConstants(cmd, _meshPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(GPUDrawPushConstants), &push_constants);
+    vkCmdBindIndexBuffer(cmd, _testMeshes[2]->meshBuffers.indexBuffer.buffer, 0, VK_INDEX_TYPE_UINT32);
+
+    vkCmdDrawIndexed(cmd, _testMeshes[2]->surfaces[0].count, 1, _testMeshes[2]->surfaces[0].startIndex, 0, 0);
+
     vkCmdEndRendering(cmd);
 }
 
@@ -298,11 +330,14 @@ void VulkanEngine::run() {
             ImGui::InputFloat4("data1",(float*)& selected.data.data1);
             ImGui::InputFloat4("data2",(float*)& selected.data.data2);
             ImGui::InputFloat4("data3",(float*)& selected.data.data3);
-            ImGui::InputFloat4("data4",(float*)& selected.data.data4);
+            ImGui::InputFloat3("data4",(float*)& selected.data.data4);
         }
         ImGui::End();
         ImGui::Render();
 
+        _backgroundEffects[currentBackgroundEffect].data.time = SDL_GetTicks64();
+
+        //fmt::print("time: {}", (_backgroundEffects[currentBackgroundEffect].data.time / 1000.0));
         draw();
     }
 }
@@ -372,8 +407,8 @@ void VulkanEngine::init_swapchain()
         _windowExtent.height,
         1
     };
-    //hardcoding the draw format to 32 bit float
-    _drawImage.imageFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
+    //hardcoding the draw format to 32-bit float
+    _drawImage.imageFormat = VK_FORMAT_R32G32B32A32_SFLOAT;
     _drawImage.imageExtent = drawImageExtent;
 
     VkImageUsageFlags drawImageUsages = {};
@@ -510,8 +545,13 @@ void VulkanEngine::init_desciptors() {
 
 void VulkanEngine::init_pipelines()
 {
+    //COMPUTE PIPELINES
     init_background_pipelines();
+
+    // GRAPHICS PIPELINES
     init_triangle_pipeline();
+    init_mesh_pipeline();
+    init_default_data();
 }
 
 void VulkanEngine::init_triangle_pipeline() {
@@ -598,7 +638,12 @@ void VulkanEngine::init_background_pipelines()
 
     VkShaderModule skyShader;
     if (!vkutil::load_shader_module("../shaders/sky.comp.spv", _device, &skyShader)) {
-        fmt::print("Error when building the compute shader \n");
+        fmt::print("Error when building the Sky shader \n");
+    }
+
+    VkShaderModule NoisyShader;
+    if (!vkutil::load_shader_module("../shaders/bruhshader.comp.spv", _device, &NoisyShader)) {
+        fmt::print("Error when building the c shader \n");
     }
 
     VkPipelineShaderStageCreateInfo stageinfo{};
@@ -614,7 +659,7 @@ void VulkanEngine::init_background_pipelines()
     computePipelineCreateInfo.layout = _gradientPipelineLayout;
     computePipelineCreateInfo.stage = stageinfo;
 
-    ComputeEffect gradient;
+    ComputeEffect gradient{};
     gradient.layout = _gradientPipelineLayout;
     gradient.name = "gradient";
     gradient.data = {};
@@ -638,18 +683,134 @@ void VulkanEngine::init_background_pipelines()
 
     VK_CHECK(vkCreateComputePipelines(_device, VK_NULL_HANDLE, 1, &computePipelineCreateInfo, nullptr, &sky.pipeline));
 
-    //add the 2 background effects into the array
+    //Add Noise Shader?
+    //change the shader module only to create the noise shader
+    computePipelineCreateInfo.stage.module = NoisyShader;
+    ComputeEffect noise{};
+    noise.layout = _gradientPipelineLayout;
+    noise.name = "noise";
+    noise.data = {};
+    //default sky parameters
+    noise.data.data1 = glm::vec4(0.5, 0.95, 0.4, 0.97);
+
+    VK_CHECK(vkCreateComputePipelines(_device, VK_NULL_HANDLE, 1, &computePipelineCreateInfo, nullptr, &noise.pipeline));
+
+    //add the 3 background effects into the array
     _backgroundEffects.push_back(gradient);
     _backgroundEffects.push_back(sky);
+    _backgroundEffects.push_back(noise);
 
     //destroy structures properly
     vkDestroyShaderModule(_device, gradientShader, nullptr);
     vkDestroyShaderModule(_device, skyShader, nullptr);
+    vkDestroyShaderModule(_device, NoisyShader, nullptr);
     _mainDeletionQueue.push_function([=]() {
         vkDestroyPipelineLayout(_device, _gradientPipelineLayout, nullptr);
+        vkDestroyPipeline(_device, noise.pipeline, nullptr);
         vkDestroyPipeline(_device, sky.pipeline, nullptr);
         vkDestroyPipeline(_device, gradient.pipeline, nullptr);
     });
+}
+
+void VulkanEngine::init_mesh_pipeline() {
+    VkShaderModule triangleFragShader;
+    if (!vkutil::load_shader_module("../shaders/colored_triangle.frag.spv", _device, &triangleFragShader)) {
+        fmt::print("Error when building the triangle fragment shader module");
+    }
+    else {
+        fmt::print("Triangle fragment shader successfully loaded");
+    }
+
+    VkShaderModule triangleVertexShader;
+    if (!vkutil::load_shader_module("../shaders/mesh_colored_triangle.vert.spv", _device, &triangleVertexShader)) {
+        fmt::print("Error when building the triangle vertex shader module");
+    }
+    else {
+        fmt::print("Triangle vertex shader successfully loaded");
+    }
+
+    VkPushConstantRange bufferRange{};
+    bufferRange.offset = 0;
+    bufferRange.size = sizeof(GPUDrawPushConstants);
+    bufferRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+
+    VkPipelineLayoutCreateInfo pipeline_layout_info = vkinit::pipeline_layout_create_info();
+    pipeline_layout_info.pPushConstantRanges = &bufferRange;
+    pipeline_layout_info.pushConstantRangeCount = 1;
+
+    VK_CHECK(vkCreatePipelineLayout(_device, &pipeline_layout_info, nullptr, &_meshPipelineLayout));
+
+
+    PipelineBuilder pipelineBuilder;
+
+    //use the triangle layout we created
+    pipelineBuilder._pipelineLayout = _meshPipelineLayout;
+    //connecting the vertex and pixel shaders to the pipeline
+    pipelineBuilder.set_shaders(triangleVertexShader, triangleFragShader);
+    //it will draw triangles
+    pipelineBuilder.set_input_topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+    //filled triangles
+    pipelineBuilder.set_polygon_mode(VK_POLYGON_MODE_FILL);
+    //no backface culling
+    pipelineBuilder.set_cull_mode(VK_CULL_MODE_NONE, VK_FRONT_FACE_CLOCKWISE);
+    //no multisampling
+    pipelineBuilder.set_multisampling_none();
+    //no blending
+    pipelineBuilder.disable_blending();
+
+    pipelineBuilder.disable_depthtest();
+
+    //connect the image format we will draw into, from draw image
+    pipelineBuilder.set_color_attachment_format(_drawImage.imageFormat);
+    pipelineBuilder.set_depth_format(VK_FORMAT_UNDEFINED);
+
+    //finally build the pipeline
+    _meshPipeline = pipelineBuilder.build_pipeline(_device);
+
+    //clean structures
+    vkDestroyShaderModule(_device, triangleFragShader, nullptr);
+    vkDestroyShaderModule(_device, triangleVertexShader, nullptr);
+
+    _mainDeletionQueue.push_function([&]() {
+        vkDestroyPipelineLayout(_device, _meshPipelineLayout, nullptr);
+        vkDestroyPipeline(_device, _meshPipeline, nullptr);
+    });
+
+}
+
+void VulkanEngine::init_default_data() {
+    std::array<Vertex,4> rect_vertices{};
+
+    rect_vertices[0].position = {0.5,-0.5, 0};
+    rect_vertices[1].position = {0.5,0.5, 0};
+    rect_vertices[2].position = {-0.5,-0.5, 0};
+    rect_vertices[3].position = {-0.5,0.5, 0};
+
+    rect_vertices[0].color = {0,0, 0,1};
+    rect_vertices[1].color = { 0.5,0.5,0.5 ,1};
+    rect_vertices[2].color = { 1,0, 0,1 };
+    rect_vertices[3].color = { 0,1, 0,1 };
+
+    std::array<uint32_t,6> rect_indices{};
+
+    rect_indices[0] = 0;
+    rect_indices[1] = 1;
+    rect_indices[2] = 2;
+
+    rect_indices[3] = 2;
+    rect_indices[4] = 1;
+    rect_indices[5] = 3;
+
+    rectangle = uploadMesh(rect_indices, rect_vertices);
+
+    //delete the rectangle data on engine shutdown
+    _mainDeletionQueue.push_function([&](){
+        destroy_buffer(rectangle.indexBuffer);
+        destroy_buffer(rectangle.vertexBuffer);
+    });
+
+    _testMeshes = loadGltfMeshes(this, "../assets/basicmesh.glb").value();
+
 }
 
 void VulkanEngine::immediate_submit(std::function<void(VkCommandBuffer cmd)>&& function) {
@@ -709,7 +870,7 @@ void VulkanEngine::init_imgui() {
     ImGui::CreateContext();
 
     // this initializes imgui for SDL
-    bool result = ImGui_ImplSDL2_InitForVulkan(_window);
+    ImGui_ImplSDL2_InitForVulkan(_window);
 
     // this initializes imgui for Vulkan
     ImGui_ImplVulkan_InitInfo init_info = {};
@@ -730,8 +891,8 @@ void VulkanEngine::init_imgui() {
 
     init_info.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
 
-    result = ImGui_ImplVulkan_Init(&init_info);
-    result = ImGui_ImplVulkan_CreateFontsTexture();
+    ImGui_ImplVulkan_Init(&init_info);
+    const bool result = ImGui_ImplVulkan_CreateFontsTexture();
     if(result != true) {
         std::cerr << "Failed to init imgui." << std::endl;
     }
@@ -754,4 +915,75 @@ void VulkanEngine::draw_imgui(VkCommandBuffer cmd, VkImageView targetImageView)
     vkCmdEndRendering(cmd);
 }
 
+AllocatedBuffer VulkanEngine::create_buffer(size_t allocSize, VkBufferUsageFlags usage, VmaMemoryUsage memoryUsage) {
+    // allocate buffer
+    VkBufferCreateInfo bufferInfo = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    bufferInfo.pNext = nullptr;
+    bufferInfo.size = allocSize;
 
+    bufferInfo.usage = usage;
+
+    VmaAllocationCreateInfo vmaallocInfo = {};
+    vmaallocInfo.usage = memoryUsage;
+    vmaallocInfo.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
+    AllocatedBuffer newBuffer{};
+
+    // allocate the buffer
+    VK_CHECK(vmaCreateBuffer(_allocator, &bufferInfo, &vmaallocInfo, &newBuffer.buffer, &newBuffer.allocation,
+        &newBuffer.info));
+
+    return newBuffer;
+}
+
+void VulkanEngine::destroy_buffer(const AllocatedBuffer& buffer) const
+{
+    vmaDestroyBuffer(_allocator, buffer.buffer, buffer.allocation);
+}
+
+GPUMeshBuffers VulkanEngine::uploadMesh(std::span<uint32_t> indices, std::span<Vertex> vertices) {
+    const size_t vertexBufferSize = vertices.size() * sizeof(Vertex);
+    const size_t indexBufferSize = indices.size() * sizeof(uint32_t);
+
+    GPUMeshBuffers newSurface{};
+
+    //create vertex buffer
+    newSurface.vertexBuffer = create_buffer(vertexBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+        VMA_MEMORY_USAGE_GPU_ONLY);
+
+    //find the adress of the vertex buffer
+    VkBufferDeviceAddressInfo deviceAdressInfo{ .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,.buffer = newSurface.vertexBuffer.buffer };
+    newSurface.vertexBufferAddress = vkGetBufferDeviceAddress(_device, &deviceAdressInfo);
+
+    //create index buffer
+    newSurface.indexBuffer = create_buffer(indexBufferSize, VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        VMA_MEMORY_USAGE_GPU_ONLY);
+
+    AllocatedBuffer staging = create_buffer(vertexBufferSize + indexBufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
+
+    void* data = staging.allocation->GetMappedData();
+
+    // copy vertex buffer
+    memcpy(data, vertices.data(), vertexBufferSize);
+    // copy index buffer
+    memcpy((char*)data + vertexBufferSize, indices.data(), indexBufferSize);
+
+    immediate_submit([&](VkCommandBuffer cmd) {
+        VkBufferCopy vertexCopy{};
+        vertexCopy.dstOffset = 0;
+        vertexCopy.srcOffset = 0;
+        vertexCopy.size = vertexBufferSize;
+
+        vkCmdCopyBuffer(cmd, staging.buffer, newSurface.vertexBuffer.buffer, 1, &vertexCopy);
+
+        VkBufferCopy indexCopy{};
+        indexCopy.dstOffset = 0;
+        indexCopy.srcOffset = vertexBufferSize;
+        indexCopy.size = indexBufferSize;
+
+        vkCmdCopyBuffer(cmd, staging.buffer, newSurface.indexBuffer.buffer, 1, &indexCopy);
+    });
+
+    destroy_buffer(staging);
+
+    return newSurface;
+}
