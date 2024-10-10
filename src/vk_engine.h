@@ -62,7 +62,7 @@ public:
     bool _isInitialized{false};
     int _frameNumber{0};
     bool stop_rendering{false};
-    VkExtent2D _windowExtent{900, 550};
+    VkExtent2D _windowExtent{600, 400};
     struct SDL_Window *_window{nullptr};
     DeletionQueue _mainDeletionQueue;
     VkInstance _instance;
@@ -87,7 +87,9 @@ public:
     VmaAllocator _allocator;
     //draw resources
     AllocatedImage _drawImage;
+    AllocatedImage _depthImage;
     VkExtent2D _drawExtent;
+    float _renderScale = 1.f;
     DescriptorAllocator globalDescriptorAllocator;
     VkDescriptorSet _drawImageDescriptors;
     VkDescriptorSetLayout _drawImageDescriptorLayout;
@@ -100,7 +102,6 @@ public:
 
     std::vector<ComputeEffect> _backgroundEffects;
     int currentBackgroundEffect{0};
-    float _dpiScale = 1.0;
 
     VkPipelineLayout _trianglePipelineLayout;
     VkPipeline _trianglePipeline;
@@ -112,10 +113,10 @@ public:
 
     std::vector<std::shared_ptr<MeshAsset>> _testMeshes;
 
+    bool resize_requested{false};
+
     void init_default_data();
     void init_mesh_pipeline();
-
-    void init_triangle_pipeline();
 
 
     static VulkanEngine &Get();
@@ -149,6 +150,7 @@ private:
     void init_commands();
     void init_sync_structures();
     void create_swapchain(uint32_t width, uint32_t height);
+    void resize_swapchain();
     void destroy_swapchain();
     void init_desciptors();
     void init_pipelines();
