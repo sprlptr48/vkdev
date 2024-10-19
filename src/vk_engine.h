@@ -62,7 +62,7 @@ public:
     bool _isInitialized{false};
     int _frameNumber{0};
     bool stop_rendering{false};
-    VkExtent2D _windowExtent{600, 400};
+    VkExtent2D _windowExtent{800, 600};
     struct SDL_Window *_window{nullptr};
     DeletionQueue _mainDeletionQueue;
     VkInstance _instance;
@@ -112,6 +112,8 @@ public:
     GPUMeshBuffers rectangle; // hardcoded rectangle buffer
 
     std::vector<std::shared_ptr<MeshAsset>> _testMeshes;
+    double totalTime = 0;
+    double totalFrames = 0;
 
     bool resize_requested{false};
 

@@ -24,6 +24,7 @@
 #include <glm/gtx/transform.hpp>
 
 #include "vk_mem_alloc.h"
+#include "fmt/format.h"
 
 static inline void log_key(SDL_Scancode keyScanCode) {
     const SDL_Keycode keycode = SDL_GetKeyFromScancode(keyScanCode);
@@ -81,6 +82,10 @@ void VulkanEngine::init() {
 
 void VulkanEngine::cleanup() {
     if (_isInitialized) {
+        const double fps = totalFrames / totalTime;
+        fmt::print("FPS: {}\n", fps);
+        fmt::print("time: {}\n", totalTime);
+        fmt::print("frames: {}\n", totalFrames);
         vkDeviceWaitIdle(_device);
         for(auto & _frame : _frames){
             vkDestroyCommandPool(_device, _frame._commandPool, nullptr);
@@ -241,10 +246,10 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd)
     vkCmdDrawIndexed(cmd, 6, 1, 0, 0, 0);
 
     //DRAW TEST MESH (basicmesh.glb)
+    //float time = SDL_GetTicks() / 1000.0f;
+    //time = (glm::sin(time) + 1.0f) / .5f; // Sine range 0-1
     const glm::mat4 view = glm::translate(glm::vec3{ 0,0,-5 });
     // camera projection
-    float time = SDL_GetTicks() / 1000.0f;
-    time = (glm::sin(time) + 1.0f) / .5f; // Sine range 0-1
     glm::mat4 projection = glm::perspective(glm::radians(70.f), (float)_drawExtent.width / (float)_drawExtent.height, 10000.f, 0.1f);
 
     // invert the Y direction on projection matrix so that we are more similar
@@ -336,7 +341,7 @@ void VulkanEngine::run() {
             ImGui::SliderFloat("Render Scale",&_renderScale, 0.1f, 1.f);
 
             ComputeEffect& selected = _backgroundEffects[currentBackgroundEffect];
-            ImGui::Text("Selected effect: ", selected.name);
+            ImGui::Text("Selected effect: %s", selected.name);
             ImGui::SliderInt("Effect Index", &currentBackgroundEffect, 0,
                              static_cast<int>(_backgroundEffects.size()) - 1);
 
@@ -344,13 +349,20 @@ void VulkanEngine::run() {
             ImGui::InputFloat4("data2",(float*)& selected.data.data2);
             ImGui::InputFloat4("data3",(float*)& selected.data.data3);
             ImGui::InputFloat3("data4",(float*)& selected.data.data4);
+
+            const std::string timeStr = fmt::format(FMT_STRING("Last Time: {} ms"), (ImGui::GetIO().DeltaTime*1000.0f));
+            //debug_log(timeStr.c_str());
+            ImGui::Text(timeStr.c_str());
+            const std::string fpsStr = fmt::format(FMT_STRING("Last 120 FPS: {}"), (ImGui::GetIO().Framerate));
+            //debug_log(fpsStr.c_str());
+            ImGui::Text(fpsStr.c_str());
         }
         ImGui::End();
         ImGui::Render();
-
+        totalTime += ImGui::GetIO().DeltaTime;
+        totalFrames += 1;
         _backgroundEffects[currentBackgroundEffect].data.time = SDL_GetTicks64();
 
-        //fmt::print("time: {}", (_backgroundEffects[currentBackgroundEffect].data.time / 1000.0));
         draw();
     }
 }
@@ -514,7 +526,7 @@ void VulkanEngine::create_swapchain(uint32_t width, uint32_t height)
     _swapchainImageFormat = VK_FORMAT_B8G8R8A8_UNORM;
     vkb::Swapchain vkbSwapchain = swapchainBuilder
             .set_desired_format(VkSurfaceFormatKHR{.format = _swapchainImageFormat, .colorSpace = VK_COLORSPACE_SRGB_NONLINEAR_KHR})
-            .set_desired_present_mode(VK_PRESENT_MODE_FIFO_KHR)
+            .set_desired_present_mode(VK_PRESENT_MODE_FIFO_RELAXED_KHR)
             .set_desired_extent(width, height)
             .add_image_usage_flags(VK_IMAGE_USAGE_TRANSFER_DST_BIT)
             .build()
@@ -565,22 +577,10 @@ void VulkanEngine::init_desciptors() {
     //allocate a descriptor set for our draw image
     _drawImageDescriptors = globalDescriptorAllocator.allocate(_device, _drawImageDescriptorLayout);
 
-    VkDescriptorImageInfo imgInfo{};
-    imgInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-    imgInfo.imageView = _drawImage.imageView;
+    DescriptorWriter writer;
+    writer.write_image(0, _drawImage.imageView, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
 
-    VkWriteDescriptorSet drawImageWrite = {};
-    drawImageWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    drawImageWrite.pNext = nullptr;
-
-    drawImageWrite.dstBinding = 0;
-    drawImageWrite.dstSet = _drawImageDescriptors;
-    drawImageWrite.descriptorCount = 1;
-    drawImageWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    drawImageWrite.pImageInfo = &imgInfo;
-
-    vkUpdateDescriptorSets(_device, 1, &drawImageWrite, 0, nullptr);
-
+    writer.update_set(_device,_drawImageDescriptors);
     //make sure both the descriptor allocator and the new layout get cleaned up properly
     _mainDeletionQueue.push_function([&]() {
         globalDescriptorAllocator.destroy_pool(_device);
