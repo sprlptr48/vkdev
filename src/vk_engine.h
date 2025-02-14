@@ -33,6 +33,7 @@ struct FrameData {
     VkSemaphore _swapchainSemaphore, _renderSemaphore;
     VkFence _renderFence;
     DeletionQueue _deletionQueue;
+    DescriptorAllocatorGrowable _frameDescriptors;
 };
 
 struct ComputePushConstants {
@@ -52,6 +53,14 @@ struct ComputeEffect {
     ComputePushConstants data;
 };
 
+struct GPUSceneData {
+    glm::mat4 view;
+    glm::mat4 proj;
+    glm::mat4 viewproj;
+    glm::vec4 ambientColor;
+    glm::vec4 sunlightDirection; // w for sun power
+    glm::vec4 sunlightColor;
+};
 
 constexpr unsigned int FRAME_OVERLAP = 2;
 
@@ -60,9 +69,9 @@ class VulkanEngine {
 public:
 
     bool _isInitialized{false};
-    int _frameNumber{0};
     bool stop_rendering{false};
-    VkExtent2D _windowExtent{800, 600};
+    int _frameNumber{0};
+    VkExtent2D _windowExtent{1920, 1080};
     struct SDL_Window *_window{nullptr};
     DeletionQueue _mainDeletionQueue;
     VkInstance _instance;
@@ -82,7 +91,7 @@ public:
     FrameData& get_current_frame() {  return _frames[_frameNumber % FRAME_OVERLAP]; };
 
     VkQueue _graphicsQueue;
-    uint32_t _graphicsQueueFamily;
+    uint32_t _graphicsQueueFamily = -1;
 
     VmaAllocator _allocator;
     //draw resources
@@ -112,8 +121,12 @@ public:
     GPUMeshBuffers rectangle; // hardcoded rectangle buffer
 
     std::vector<std::shared_ptr<MeshAsset>> _testMeshes;
-    double totalTime = 0;
+    double totalTime = 0; // seconds
     double totalFrames = 0;
+
+    GPUSceneData sceneData;
+
+    VkDescriptorSetLayout _gpuSceneDataDescriptorLayout;
 
     bool resize_requested{false};
 
@@ -145,6 +158,9 @@ public:
     AllocatedBuffer create_buffer(size_t allocSize, VkBufferUsageFlags usage, VmaMemoryUsage memoryUsage);
     void destroy_buffer(const AllocatedBuffer& buffer) const;
     GPUMeshBuffers uploadMesh(std::span<uint32_t> indices, std::span<Vertex> vertices);
+
+    AllocatedImage create_image(VkExtent3D size, VkFormat format, VkImageUsageFlags usage, bool mipmapped=false);
+    AllocatedImage create_image(void* data, VkExtent3D size, VkFormat format, VkImageUsageFlags usage, bool mipmapped=false);
 
 private:
     void init_vulkan();

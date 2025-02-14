@@ -20,6 +20,8 @@
 
 #define VMA_IMPLEMENTATION
 #include <iostream>
+#include <SDL_keyboard.h>
+#include <SDL_video.h>
 
 #include <glm/gtx/transform.hpp>
 
@@ -54,7 +56,7 @@ void VulkanEngine::init() {
     // We initialize SDL and create a window with it.
     SDL_Init(SDL_INIT_VIDEO);
 
-    constexpr SDL_WindowFlags window_flags =
+    constexpr auto window_flags =
         static_cast<SDL_WindowFlags>(SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
     _window = SDL_CreateWindow(
             "Vulkan Engine",
@@ -63,6 +65,7 @@ void VulkanEngine::init() {
             _windowExtent.width,
             _windowExtent.height,
             window_flags);
+    SDL_SetWindowPosition(_window, 50, 50);
     int width, height;
     SDL_Vulkan_GetDrawableSize(_window, &width, &height);
     _renderScale = _windowExtent.width / static_cast<float>(width);
@@ -83,9 +86,10 @@ void VulkanEngine::init() {
 void VulkanEngine::cleanup() {
     if (_isInitialized) {
         const double fps = totalFrames / totalTime;
-        fmt::print("FPS: {}\n", fps);
-        fmt::print("time: {}\n", totalTime);
-        fmt::print("frames: {}\n", totalFrames);
+        const double avgms = totalTime/ totalFrames * 1000;
+        fmt::println("Frames Per Second (FPS): {:.3f}", fps);
+        fmt::println("total runtime: {:.2f} seconds", totalTime);
+        fmt::println("average frame ms: {:.3f}ms", avgms);
         vkDeviceWaitIdle(_device);
         for(auto & _frame : _frames){
             vkDestroyCommandPool(_device, _frame._commandPool, nullptr);
@@ -120,14 +124,18 @@ void VulkanEngine::cleanup() {
 
 void VulkanEngine::draw()
 {
-    // Wait for the GPU work to finish
+    //wait until the GPU has finished rendering the last frame. Timeout of 1 second
     VK_CHECK(vkWaitForFences(_device, 1, &get_current_frame()._renderFence, true, 1000000000));
+
+    get_current_frame()._deletionQueue.flush();
+    get_current_frame()._frameDescriptors.clear_pools(_device);
     // delete the old per frame data
     get_current_frame()._deletionQueue.flush();
+
     VK_CHECK(vkResetFences(_device, 1, &get_current_frame()._renderFence));
     // set drawextent every frame, for resolution scale and resize
-    _drawExtent.height = std::min(_swapchainExtent.height, _drawImage.imageExtent.height) * _renderScale;
-    _drawExtent.width  = std::min(_swapchainExtent.width, _drawImage.imageExtent.width) * _renderScale;
+    _drawExtent.height = glm::min(_swapchainExtent.height, _drawImage.imageExtent.height) * _renderScale;
+    _drawExtent.width  = glm::min(_swapchainExtent.width, _drawImage.imageExtent.width) * _renderScale;
 
     //request image from the swapchain
     uint32_t swapchainImageIndex;
@@ -215,8 +223,30 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd)
 
     VkRenderingInfo renderInfo = vkinit::rendering_info(_drawExtent, &colorAttachment, &depthAttachment);
     vkCmdBeginRendering(cmd, &renderInfo);
-
+    // Bind the pipeline
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _meshPipeline);
+
+
+    //allocate a new uniform buffer for the scene data
+    AllocatedBuffer gpuSceneDataBuffer = create_buffer(sizeof(GPUSceneData), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+
+    //add it to the deletion queue of this frame so it gets deleted once its been used
+    get_current_frame()._deletionQueue.push_function([=, this]() {
+        destroy_buffer(gpuSceneDataBuffer);
+        });
+
+    //write the buffer
+    GPUSceneData* sceneUniformData = (GPUSceneData*)gpuSceneDataBuffer.allocation->GetMappedData();
+    *sceneUniformData = sceneData;
+
+    //create a descriptor set that binds that buffer and update it
+    VkDescriptorSet globalDescriptor = get_current_frame()._frameDescriptors.allocate(_device, _gpuSceneDataDescriptorLayout);
+
+    DescriptorWriter writer;
+    writer.write_buffer(0, gpuSceneDataBuffer.buffer, sizeof(GPUSceneData), 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
+    writer.update_set(_device, globalDescriptor);
+    // Bind the descriptor set
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _meshPipelineLayout, 0, 1, &globalDescriptor, 0, nullptr);
 
     //set dynamic viewport and scissor
     VkViewport viewport = {};
@@ -317,6 +347,15 @@ void VulkanEngine::run() {
                 if (e.key.keysym.scancode == SDL_SCANCODE_ESCAPE) {
                     debug_log("Exiting Application");
                     bQuit = true;
+                } else if (e.key.keysym.scancode == SDL_SCANCODE_F11 || e.key.keysym.scancode == SDL_SCANCODE_F) {
+                    const unsigned int flags = SDL_GetWindowFlags(_window);
+                    if ((flags & SDL_WINDOW_FULLSCREEN_DESKTOP) == 0) { // Check if fullscreen flag is NOT set
+                        debug_log("Enabling Fullscreen");
+                        SDL_SetWindowFullscreen(_window, SDL_WINDOW_FULLSCREEN_DESKTOP);
+                    } else { // If fullscreen flag is set
+                        debug_log("Disabling Fullscreen");
+                        SDL_SetWindowFullscreen(_window, 0);
+                    }
                 }
             }
             ImGui_ImplSDL2_ProcessEvent(&e);
@@ -331,6 +370,7 @@ void VulkanEngine::run() {
         if(resize_requested == true) {
             resize_swapchain();
             debug_log("Resized");
+            fmt::println("New Res: {0}x{1}", _windowExtent.width, _windowExtent.height);
         }
         // imgui new frame
         ImGui_ImplVulkan_NewFrame();
@@ -404,13 +444,20 @@ void VulkanEngine::init_vulkan()
     // Create the final Vulkan Device
     vkb::DeviceBuilder deviceBuilder{ physicalDevice };
     vkb::Device vkbDevice = deviceBuilder.build().value();
+    fmt::println("LOG: Device Created {0}", physicalDevice.name);
 
     _device = vkbDevice.device;
     _chosenGPU = physicalDevice.physical_device;
 
     // Get a GUQUUEU
     _graphicsQueue = vkbDevice.get_queue(vkb::QueueType::graphics).value();
+    if(!_graphicsQueue) {
+        debug_log("Failed to create graphics queue");
+    }
     _graphicsQueueFamily = vkbDevice.get_queue_index(vkb::QueueType::graphics).value();
+    if(_graphicsQueueFamily == -1) {
+        debug_log("Failed to create graphics queue family");
+    }
 
     VmaAllocatorCreateInfo allocatorInfo = {};
     allocatorInfo.physicalDevice = _chosenGPU;
@@ -444,7 +491,7 @@ void VulkanEngine::init_swapchain()
 
     VkImageCreateInfo rimg_info = vkinit::image_create_info(_drawImage.imageFormat, drawImageUsages, _drawImage.imageExtent);
     VmaAllocationCreateInfo rimg_allocinfo = {};
-    rimg_allocinfo.usage = VMA_MEMORY_USAGE_GPU_ONLY; // TODO: this shit is cool, check the types
+    rimg_allocinfo.usage = VMA_MEMORY_USAGE_GPU_ONLY; // TODO
     rimg_allocinfo.requiredFlags = VkMemoryPropertyFlags(VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 
     // ALLOCATE/CREATE the IMAGE
@@ -587,6 +634,31 @@ void VulkanEngine::init_desciptors() {
 
         vkDestroyDescriptorSetLayout(_device, _drawImageDescriptorLayout, nullptr);
     });
+    // Uniform Buffer for GPU scene data, ambient light etc.
+    {
+        DescriptorLayoutBuilder builder;
+        builder.add_binding(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
+        _gpuSceneDataDescriptorLayout = builder.build(_device, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT);
+    }
+    // Add to main deletion queue
+    _mainDeletionQueue.push_function([=]() {
+        vkDestroyDescriptorSetLayout(_device, _gpuSceneDataDescriptorLayout, nullptr);
+    });
+    for (int i = 0; i < FRAME_OVERLAP; i++) {
+        // create a descriptor pool
+        std::vector<DescriptorAllocatorGrowable::PoolSizeRatio> frame_sizes = {
+            { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 3 },
+            { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3 },
+            { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 3 },
+            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4 },
+        };
+        _frames[i]._frameDescriptors = DescriptorAllocatorGrowable{};
+        _frames[i]._frameDescriptors.init(_device, 1000, frame_sizes);
+
+        _mainDeletionQueue.push_function([&, i]() {
+            _frames[i]._frameDescriptors.destroy_pools(_device);
+        });
+    }
 }
 
 void VulkanEngine::init_pipelines()
@@ -632,7 +704,10 @@ void VulkanEngine::init_background_pipelines()
     if (!vkutil::load_shader_module("../shaders/bruhshader.comp.spv", _device, &NoisyShader)) {
         fmt::print("Error when building the c shader \n");
     }
-
+    VkShaderModule ClaudeShader;
+    if (!vkutil::load_shader_module("../shaders/claude.comp.spv", _device, &ClaudeShader)) {
+        fmt::print("Error when building Claude's shader \n");
+    }
     VkPipelineShaderStageCreateInfo stageinfo{};
     stageinfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     stageinfo.pNext = nullptr;
@@ -682,17 +757,31 @@ void VulkanEngine::init_background_pipelines()
 
     VK_CHECK(vkCreateComputePipelines(_device, VK_NULL_HANDLE, 1, &computePipelineCreateInfo, nullptr, &noise.pipeline));
 
-    //add the 3 background effects into the array
+    //Add CLAUDE shader
+    computePipelineCreateInfo.stage.module = ClaudeShader;
+    ComputeEffect claude{};
+    claude.layout = _gradientPipelineLayout;
+    claude.name = "claude";
+    claude.data = {};
+    //default sky parameters
+    claude.data.data1 = glm::vec4(0.5, 0.95, 0.4, 0.97);
+
+    VK_CHECK(vkCreateComputePipelines(_device, VK_NULL_HANDLE, 1, &computePipelineCreateInfo, nullptr, &claude.pipeline));
+
+    //add the background effects into the array
     _backgroundEffects.push_back(gradient);
     _backgroundEffects.push_back(sky);
     _backgroundEffects.push_back(noise);
+    _backgroundEffects.push_back(claude);
 
     //destroy structures properly
     vkDestroyShaderModule(_device, gradientShader, nullptr);
     vkDestroyShaderModule(_device, skyShader, nullptr);
     vkDestroyShaderModule(_device, NoisyShader, nullptr);
+    vkDestroyShaderModule(_device, ClaudeShader, nullptr);
     _mainDeletionQueue.push_function([=]() {
         vkDestroyPipelineLayout(_device, _gradientPipelineLayout, nullptr);
+        vkDestroyPipeline(_device, claude.pipeline, nullptr);
         vkDestroyPipeline(_device, noise.pipeline, nullptr);
         vkDestroyPipeline(_device, sky.pipeline, nullptr);
         vkDestroyPipeline(_device, gradient.pipeline, nullptr);
@@ -716,6 +805,9 @@ void VulkanEngine::init_mesh_pipeline() {
         fmt::print("Triangle vertex shader successfully loaded");
     }
 
+    // Descriptor Set Layout for the scene data (add this to pipeline layout)
+    VkDescriptorSetLayout *setLayout = &_gpuSceneDataDescriptorLayout;
+
     VkPushConstantRange bufferRange{};
     bufferRange.offset = 0;
     bufferRange.size = sizeof(GPUDrawPushConstants);
@@ -724,6 +816,8 @@ void VulkanEngine::init_mesh_pipeline() {
     VkPipelineLayoutCreateInfo pipeline_layout_info = vkinit::pipeline_layout_create_info();
     pipeline_layout_info.pPushConstantRanges = &bufferRange;
     pipeline_layout_info.pushConstantRangeCount = 1;
+    pipeline_layout_info.setLayoutCount = 1;
+    pipeline_layout_info.pSetLayouts = setLayout;
 
     VK_CHECK(vkCreatePipelineLayout(_device, &pipeline_layout_info, nullptr, &_meshPipelineLayout));
 
