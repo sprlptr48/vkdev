@@ -700,8 +700,8 @@ void VulkanEngine::init_background_pipelines()
         fmt::print("Error when building the Sky shader \n");
     }
 
-    VkShaderModule NoisyShader;
-    if (!vkutil::load_shader_module("../shaders/bruhshader.comp.spv", _device, &NoisyShader)) {
+    VkShaderModule planetShader;
+    if (!vkutil::load_shader_module("../shaders/planets.comp.spv", _device, &planetShader)) {
         fmt::print("Error when building the c shader \n");
     }
     VkShaderModule ClaudeShader;
@@ -745,17 +745,16 @@ void VulkanEngine::init_background_pipelines()
 
     VK_CHECK(vkCreateComputePipelines(_device, VK_NULL_HANDLE, 1, &computePipelineCreateInfo, nullptr, &sky.pipeline));
 
-    //Add Noise Shader?
-    //change the shader module only to create the noise shader
-    computePipelineCreateInfo.stage.module = NoisyShader;
-    ComputeEffect noise{};
-    noise.layout = _gradientPipelineLayout;
-    noise.name = "noise";
-    noise.data = {};
+    // create planet shader
+    computePipelineCreateInfo.stage.module = planetShader;
+    ComputeEffect planet{};
+    planet.layout = _gradientPipelineLayout;
+    planet.name = "planets";
+    planet.data = {};
     //default sky parameters
-    noise.data.data1 = glm::vec4(0.5, 0.95, 0.4, 0.97);
+    planet.data.data1 = glm::vec4(0.5, 0.95, 0.4, 0.97);
 
-    VK_CHECK(vkCreateComputePipelines(_device, VK_NULL_HANDLE, 1, &computePipelineCreateInfo, nullptr, &noise.pipeline));
+    VK_CHECK(vkCreateComputePipelines(_device, VK_NULL_HANDLE, 1, &computePipelineCreateInfo, nullptr, &planet.pipeline));
 
     //Add CLAUDE shader
     computePipelineCreateInfo.stage.module = ClaudeShader;
@@ -771,18 +770,18 @@ void VulkanEngine::init_background_pipelines()
     //add the background effects into the array
     _backgroundEffects.push_back(gradient);
     _backgroundEffects.push_back(sky);
-    _backgroundEffects.push_back(noise);
+    _backgroundEffects.push_back(planet);
     _backgroundEffects.push_back(claude);
 
     //destroy structures properly
     vkDestroyShaderModule(_device, gradientShader, nullptr);
     vkDestroyShaderModule(_device, skyShader, nullptr);
-    vkDestroyShaderModule(_device, NoisyShader, nullptr);
+    vkDestroyShaderModule(_device, planetShader, nullptr);
     vkDestroyShaderModule(_device, ClaudeShader, nullptr);
     _mainDeletionQueue.push_function([=]() {
         vkDestroyPipelineLayout(_device, _gradientPipelineLayout, nullptr);
         vkDestroyPipeline(_device, claude.pipeline, nullptr);
-        vkDestroyPipeline(_device, noise.pipeline, nullptr);
+        vkDestroyPipeline(_device, planet.pipeline, nullptr);
         vkDestroyPipeline(_device, sky.pipeline, nullptr);
         vkDestroyPipeline(_device, gradient.pipeline, nullptr);
     });
