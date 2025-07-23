@@ -13,7 +13,7 @@
 #include <fastgltf/parser.hpp>
 #include <fastgltf/tools.hpp>
 
-std::optional<std::vector<std::shared_ptr<MeshAsset>>> loadGltfMeshes(VulkanEngine* engine, std::filesystem::path filePath) {
+std::optional<std::vector<std::shared_ptr<MeshAsset>>> loadGltfMeshes(VulkanEngine* engine, const std::filesystem::path& filePath) {
     fmt::println("Loading GLTF meshes in file: {}\n", filePath.string());
 
     fastgltf::GltfDataBuffer data;
@@ -43,6 +43,8 @@ std::optional<std::vector<std::shared_ptr<MeshAsset>>> loadGltfMeshes(VulkanEngi
         MeshAsset newmesh; // Mesh / suzanne monkey / cube
 
         newmesh.name = mesh.name;
+        // Initialize the transform matrix to identity (no transformation).
+        newmesh.transform = glm::mat4(1.0f);
 
         // clear the mesh arrays each mesh, we don't want to merge them by error
         indices.clear();
@@ -113,6 +115,10 @@ std::optional<std::vector<std::shared_ptr<MeshAsset>>> loadGltfMeshes(VulkanEngi
                         vertices[initial_vtx + index].color = v;
                     });
             }
+
+            // TODO: load textures/images
+            auto textures = p.findAttribute("TEXTURE_0");
+
             newmesh.surfaces.push_back(newSurface); // upload triangle of suzanne/cube
         }
 

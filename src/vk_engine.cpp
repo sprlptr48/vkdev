@@ -79,6 +79,8 @@ void VulkanEngine::init() {
     init_descriptors();
     init_pipelines();
     init_imgui();
+    init_default_data();
+
 
     // everything went fine
     _isInitialized = true;
@@ -102,7 +104,7 @@ void VulkanEngine::cleanup() {
             _frame._deletionQueue.flush();
         }
 
-        for (auto& mesh : _testMeshes) {
+        for (auto& mesh : _loadedMeshes) {
             destroy_buffer(mesh->meshBuffers.indexBuffer);
             destroy_buffer(mesh->meshBuffers.vertexBuffer);
         }
@@ -216,16 +218,14 @@ void VulkanEngine::draw()
     _frameNumber++;
 }
 
+// Render fully dynamically loaded mesh
 void VulkanEngine::draw_geometry(VkCommandBuffer cmd)
 {
-    //begin a render pass  connected to our draw image
     VkRenderingAttachmentInfo colorAttachment = vkinit::attachment_info(_drawImage.imageView, nullptr, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     VkRenderingAttachmentInfo depthAttachment = vkinit::depth_attachment_info(_depthImage.imageView, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
-
     VkRenderingInfo renderInfo = vkinit::rendering_info(_drawExtent, &colorAttachment, &depthAttachment);
     vkCmdBeginRendering(cmd, &renderInfo);
 
-    //set dynamic viewport and scissor
     VkViewport viewport = {};
     viewport.x = 0;
     viewport.y = 0;
@@ -233,7 +233,6 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd)
     viewport.height = _drawExtent.height;
     viewport.minDepth = 0.f;
     viewport.maxDepth = 1.f;
-
     vkCmdSetViewport(cmd, 0, 1, &viewport);
 
     VkRect2D scissor = {};
@@ -243,40 +242,41 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd)
     scissor.extent.height = viewport.height;
     vkCmdSetScissor(cmd, 0, 1, &scissor);
 
+    // Only draw if a valid mesh is selected
+    if (_selectedMeshIndex < 0 || _selectedMeshIndex >= _loadedMeshes.size()) {
+        vkCmdEndRendering(cmd);
+        return;
+    }
+
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _meshPipeline);
 
-    //bind a texture
+    // Bind a texture descriptor set
     VkDescriptorSet imageSet = get_current_frame()._frameDescriptors.allocate(_device, _singleImageDescriptorLayout);
     {
         DescriptorWriter writer;
         writer.write_image(0, _errorCheckerboardImage.imageView, _defaultSamplerNearest, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         writer.update_set(_device, imageSet);
     }
-
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _meshPipelineLayout, 0, 1, &imageSet, 0, nullptr);
 
-    // Create view matrix from camera position and orientation
-    const glm::mat4 view = glm::lookAt(
-        cameraPos,                    // Camera position
-        cameraPos + cameraFront,      // Look at point (in front of camera)
-        cameraUp                      // Up vector
-    );
-
-    // camera projection
+    // Use the camera for view and projection matrices
     glm::mat4 projection = glm::perspective(glm::radians(70.f), (float)_drawExtent.width / (float)_drawExtent.height, 10000.f, 0.1f);
-
-    // invert the Y direction on projection matrix so that we are more similar
-    // to opengl and gltf axis
     projection[1][1] *= -1;
 
+    auto& currentMesh = _loadedMeshes.at(_selectedMeshIndex);
+
+    // Set push constants for the entire mesh
     GPUDrawPushConstants push_constants{};
-    push_constants.worldMatrix = projection * view;
-    push_constants.vertexBuffer = _testMeshes[2]->meshBuffers.vertexBufferAddress;
-
+    push_constants.worldMatrix = projection * _camera.get_view_matrix() * currentMesh->transform; // Use camera's view matrix
+    push_constants.vertexBuffer = currentMesh->meshBuffers.vertexBufferAddress;
     vkCmdPushConstants(cmd, _meshPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(GPUDrawPushConstants), &push_constants);
-    vkCmdBindIndexBuffer(cmd, _testMeshes[2]->meshBuffers.indexBuffer.buffer, 0, VK_INDEX_TYPE_UINT32);
 
-    vkCmdDrawIndexed(cmd, _testMeshes[2]->surfaces[0].count, 1, _testMeshes[2]->surfaces[0].startIndex, 0, 0);
+    vkCmdBindIndexBuffer(cmd, currentMesh->meshBuffers.indexBuffer.buffer, 0, VK_INDEX_TYPE_UINT32);
+
+    // Draw all surfaces (primitives) of the mesh
+    for (auto& surface : currentMesh->surfaces) {
+        vkCmdDrawIndexed(cmd, surface.count, 1, surface.startIndex, 0, 0);
+    }
 
     vkCmdEndRendering(cmd);
 }
@@ -299,12 +299,8 @@ void VulkanEngine::draw_background(VkCommandBuffer cmd)
     // bind the descriptor set containing the draw image for the compute pipeline
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _gradientPipelineLayout, 0, 1, &_drawImageDescriptors, 0, nullptr);
 
-    // Update the view matrix from camera
-    effect.data.viewMatrix = glm::lookAt(
-        cameraPos,                    // Camera position
-        cameraPos + cameraFront,      // Look at point (in front of camera)
-        cameraUp                      // Up vector
-    );
+    // Update the view matrix from camera (new)
+    effect.data.viewMatrix = _camera.get_view_matrix();
 
     vkCmdPushConstants(cmd, _gradientPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ComputePushConstants), &effect.data);
     // execute the compute pipeline dispatch. We are using 16x16 workgroup size so we need to divide by it
@@ -334,79 +330,31 @@ void VulkanEngine::run() {
                 }
             }
             if (e.type == SDL_KEYDOWN) {
-                log_key(e.key.keysym.scancode);
-                if (e.key.keysym.scancode == SDL_SCANCODE_ESCAPE) {
-                    debug_log("Exiting Application");
-                    bQuit = true;
-                } else if (e.key.keysym.scancode == SDL_SCANCODE_F11 || e.key.keysym.scancode == SDL_SCANCODE_F) {
+                if (e.key.keysym.scancode == SDL_SCANCODE_ESCAPE) bQuit = true;
+                if (e.key.keysym.scancode == SDL_SCANCODE_F11 || e.key.keysym.scancode == SDL_SCANCODE_F) {
                     const unsigned int flags = SDL_GetWindowFlags(_window);
-                    if ((flags & SDL_WINDOW_FULLSCREEN_DESKTOP) == 0) { // Check if fullscreen flag is NOT set
-                        debug_log("Enabling Fullscreen");
-                        SDL_SetWindowFullscreen(_window, SDL_WINDOW_FULLSCREEN_DESKTOP);
-                    } else { // If fullscreen flag is set
-                        debug_log("Disabling Fullscreen");
-                        SDL_SetWindowFullscreen(_window, 0);
-                    }
-                } else if (e.key.keysym.scancode == SDL_SCANCODE_M) {
-                    mouseCaptured = !mouseCaptured;
-                    SDL_SetRelativeMouseMode(mouseCaptured ? SDL_TRUE : SDL_FALSE);
+                    SDL_SetWindowFullscreen(_window, (flags & SDL_WINDOW_FULLSCREEN_DESKTOP) == 0 ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
+                }
+                if (e.key.keysym.scancode == SDL_SCANCODE_M) {
+                    _mouseCaptured = !_mouseCaptured;
+                    SDL_SetRelativeMouseMode(_mouseCaptured ? SDL_TRUE : SDL_FALSE);
                 }
             }
             ImGui_ImplSDL2_ProcessEvent(&e);
         }
 
-        // Handle mouse movement for camera look
-        if (mouseCaptured) {
+
+        const auto now = std::chrono::high_resolution_clock::now();
+        const double deltaTime = std::chrono::duration<double, std::milli>(now - lastTime).count() / 1000.0;
+        lastTime = now;
+        if (_mouseCaptured) {
             int mouseX, mouseY;
             SDL_GetRelativeMouseState(&mouseX, &mouseY);
-            
-            yaw += mouseX * mouseSensitivity;
-            pitch -= mouseY * mouseSensitivity; // Negative because SDL's Y is inverted
-            
-            // Clamp pitch to prevent flipping
-            pitch = std::clamp(pitch, -89.0f, 89.0f);
-            
-            // Update camera vectors
-            glm::vec3 direction;
-            direction.x = cos(glm::radians(yaw)) * cos(glm::radians(pitch));
-            direction.y = sin(glm::radians(pitch));
-            direction.z = sin(glm::radians(yaw)) * cos(glm::radians(pitch));
-            cameraFront = glm::normalize(direction);
-            cameraRight = glm::normalize(glm::cross(cameraFront, glm::vec3(0.0f, 1.0f, 0.0f)));
-            cameraUp = glm::normalize(glm::cross(cameraRight, cameraFront));
+            _camera.process_mouse_movement(static_cast<float>(mouseX), static_cast<float>(-mouseY));
         }
-
-        // Handle keyboard input for movement
         const Uint8* state = SDL_GetKeyboardState(nullptr);
         if (!stop_rendering) {
-            const auto now = std::chrono::high_resolution_clock::now();
-            const double deltaTime = std::chrono::duration<double, std::milli>(now - lastTime).count() / 1000.0;
-            
-            const float moveAmount = cameraSpeed * deltaTime;
-            
-            // Forward/Backward (W/S)
-            if (state[SDL_SCANCODE_W]) {
-                cameraPos += cameraFront * moveAmount;
-            }
-            if (state[SDL_SCANCODE_S]) {
-                cameraPos -= cameraFront * moveAmount;
-            }
-            
-            // Left/Right (A/D)
-            if (state[SDL_SCANCODE_A]) {
-                cameraPos -= cameraRight * moveAmount;
-            }
-            if (state[SDL_SCANCODE_D]) {
-                cameraPos += cameraRight * moveAmount;
-            }
-            
-            // Up/Down (Space/Left Shift)
-            if (state[SDL_SCANCODE_SPACE]) {
-                cameraPos += cameraUp * moveAmount;
-            }
-            if (state[SDL_SCANCODE_LSHIFT]) {
-                cameraPos -= cameraUp * moveAmount;
-            }
+            _camera.process_keyboard(state, static_cast<float>(deltaTime));
         }
 
         // do not draw if we are minimized
@@ -420,9 +368,7 @@ void VulkanEngine::run() {
             debug_log("Resized");
             fmt::println("New Res: {0}x{1}", _windowExtent.width, _windowExtent.height);
         }
-        const auto now = std::chrono::high_resolution_clock::now();
-        const double deltaTime = std::chrono::duration<double, std::milli>(now - lastTime).count() / 1000.0;
-        lastTime = now;
+
         totalTime += deltaTime;
         totalFrames += 1;
         // imgui new frame
@@ -440,12 +386,7 @@ void VulkanEngine::run() {
             ImGui::Text(fpsStr.c_str());
 
             ImGui::SliderFloat("Render Scale",&_renderScale, 0.1f, 1.f);
-            ImGui::SliderFloat("Camera Speed", &cameraSpeed, 1.0f, 20.0f);
-            ImGui::SliderFloat("Mouse Sensitivity", &mouseSensitivity, 0.01f, 1.0f);
-            ImGui::Text("Camera Position: %.2f, %.2f, %.2f", cameraPos.x, cameraPos.y, cameraPos.z);
-            ImGui::Text("Camera Direction: %.2f, %.2f, %.2f", cameraFront.x, cameraFront.y, cameraFront.z);
-            ImGui::Text("Pitch: %.2f, Yaw: %.2f", pitch, yaw);
-            ImGui::Text("Press 'M' to toggle mouse capture");
+
 
             ComputeEffect& selected = _backgroundEffects[currentBackgroundEffect];
             ImGui::Text("Selected effect: %s", selected.name);
@@ -463,6 +404,55 @@ void VulkanEngine::run() {
                     SDL_SetWindowSize(_window, _requestedExtent.width, _requestedExtent.height);
                     resize_requested = true;
                 }
+            }
+        }
+        ImGui::End();
+                // --- MODIFIED: New ImGui window for renderer controls ---
+        ImGui::Begin("Controls");
+        {
+            ImGui::Text("FPS: %.2f (%.3f ms/frame)", ImGui::GetIO().Framerate, 1000.0f / ImGui::GetIO().Framerate);
+            ImGui::SliderFloat("Render Scale", &_renderScale, 0.1f, 1.f);
+
+            ImGui::Separator();
+            ImGui::Text("Camera");
+            ImGui::SliderFloat("Camera Speed", &_camera.speed, 1.0f, 20.0f);
+            ImGui::SliderFloat("Mouse Sensitivity", &_camera.mouseSensitivity, 0.01f, 1.0f);
+            ImGui::Text("Pos: %.2f, %.2f, %.2f", _camera.position.x, _camera.position.y, _camera.position.z);
+            ImGui::Text("Press 'M' to toggle mouse capture");
+
+            ImGui::Separator();
+            ImGui::Text("Model Loading");
+
+            static char modelPathBuffer[256] = "../assets/basicmesh.glb";
+            ImGui::InputText("Model Path", modelPathBuffer, sizeof(modelPathBuffer));
+
+            if (ImGui::Button("Load Model")) {
+                // 1. Cleanup old resources
+                for (auto& mesh : _loadedMeshes) {
+                    destroy_buffer(mesh->meshBuffers.indexBuffer);
+                    destroy_buffer(mesh->meshBuffers.vertexBuffer);
+                }
+                _loadedMeshes.clear();
+                _selectedMeshIndex = -1;
+
+                // 2. Load new model
+                auto loadResult = loadGltfMeshes(this, modelPathBuffer);
+                if (loadResult.has_value()) {
+                    _loadedMeshes = std::move(loadResult.value());
+                    if (!_loadedMeshes.empty()) {
+                        _selectedMeshIndex = 0; // Default to the first mesh
+                    }
+                } else {
+                    fmt::println("ERROR: Failed to load model from {}", modelPathBuffer);
+                }
+            }
+
+            if (!_loadedMeshes.empty()) {
+                std::vector<const char*> meshNames;
+                for (const auto& mesh : _loadedMeshes) {
+                    meshNames.push_back(mesh->name.c_str());
+                }
+                ImGui::Combo("Select Mesh", &_selectedMeshIndex, meshNames.data(), meshNames.size());
             }
         }
         ImGui::End();
@@ -748,7 +738,6 @@ void VulkanEngine::init_pipelines()
     init_background_pipelines();
 
     init_mesh_pipeline();
-    init_default_data();
 }
 
 
@@ -862,25 +851,17 @@ void VulkanEngine::init_background_pipelines()
     });
 }
 
+// MODIFIED: Uses new simple shaders
 void VulkanEngine::init_mesh_pipeline() {
-    VkShaderModule triangleFragShader;
-    if (!vkutil::load_shader_module("../shaders/tex_image.frag.spv", _device, &triangleFragShader)) {
-        fmt::print("Error when building the triangle fragment shader module");
-    }
-    else {
-        fmt::println("Triangle fragment shader successfully loaded");
+    VkShaderModule fragShader;
+    if (!vkutil::load_shader_module("../shaders/simple.frag.spv", _device, &fragShader)) {
+        fmt::println("Error when building the simple fragment shader module");
     }
 
-    VkShaderModule triangleVertexShader;
-    if (!vkutil::load_shader_module("../shaders/mesh_colored_triangle.vert.spv", _device, &triangleVertexShader)) {
-        fmt::println("Error when building the triangle vertex shader module");
+    VkShaderModule vertShader;
+    if (!vkutil::load_shader_module("../shaders/simple.vert.spv", _device, &vertShader)) {
+        fmt::println("Error when building the simple vertex shader module");
     }
-    else {
-        fmt::println("Triangle vertex shader successfully loaded");
-    }
-
-    // Descriptor Set Layout for the scene data (add this to pipeline layout)
-    //VkDescriptorSetLayout *setLayout = &_gpuSceneDataDescriptorLayout;
 
     VkPushConstantRange bufferRange{};
     bufferRange.offset = 0;
@@ -892,85 +873,64 @@ void VulkanEngine::init_mesh_pipeline() {
     pipeline_layout_info.pushConstantRangeCount = 1;
     pipeline_layout_info.pSetLayouts = &_singleImageDescriptorLayout;
     pipeline_layout_info.setLayoutCount = 1;
-    //pipeline_layout_info.pSetLayouts = setLayout;
 
     VK_CHECK(vkCreatePipelineLayout(_device, &pipeline_layout_info, nullptr, &_meshPipelineLayout));
 
-
     PipelineBuilder pipelineBuilder;
-
-    //use the triangle layout we created
     pipelineBuilder._pipelineLayout = _meshPipelineLayout;
-    //connecting the vertex and pixel shaders to the pipeline
-    pipelineBuilder.set_shaders(triangleVertexShader, triangleFragShader);
-    //it will draw triangles
+    pipelineBuilder.set_shaders(vertShader, fragShader);
     pipelineBuilder.set_input_topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
-    //filled triangles
     pipelineBuilder.set_polygon_mode(VK_POLYGON_MODE_FILL);
-    //no backface culling
     pipelineBuilder.set_cull_mode(VK_CULL_MODE_NONE, VK_FRONT_FACE_CLOCKWISE);
-    //no multisampling
     pipelineBuilder.set_multisampling_none();
-    //no blending
     pipelineBuilder.disable_blending();
-    //pipelineBuilder.enable_blending_additive();
-
     pipelineBuilder.enable_depthtest(true, VK_COMPARE_OP_GREATER_OR_EQUAL);
-    //connect the image format we will draw into, from draw image
     pipelineBuilder.set_color_attachment_format(_drawImage.imageFormat);
     pipelineBuilder.set_depth_format(_depthImage.imageFormat);
 
-    //finally build the pipeline
     _meshPipeline = pipelineBuilder.build_pipeline(_device);
 
-    //clean structures
-    vkDestroyShaderModule(_device, triangleFragShader, nullptr);
-    vkDestroyShaderModule(_device, triangleVertexShader, nullptr);
+    vkDestroyShaderModule(_device, fragShader, nullptr);
+    vkDestroyShaderModule(_device, vertShader, nullptr);
 
     _mainDeletionQueue.push_function([&]() {
         vkDestroyPipelineLayout(_device, _meshPipelineLayout, nullptr);
         vkDestroyPipeline(_device, _meshPipeline, nullptr);
     });
-
 }
 
+// MODIFIED: Does not load any test meshes by default anymore.
 void VulkanEngine::init_default_data() {
-    //3 default textures, white, grey, black. 1 pixel each
+    // 3 default textures, white, grey, black. 1 pixel each
     uint32_t white = glm::packUnorm4x8(glm::vec4(1, 1, 1, 1));
-    _whiteImage = create_image((void*)&white, VkExtent3D{ 1, 1, 1 }, VK_FORMAT_R8G8B8A8_UNORM,
-        VK_IMAGE_USAGE_SAMPLED_BIT);
+    _whiteImage = create_image((void*)&white, VkExtent3D{ 1, 1, 1 }, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT);
     uint32_t grey = glm::packUnorm4x8(glm::vec4(0.66f, 0.66f, 0.66f, 1));
-    _greyImage = create_image((void*)&grey, VkExtent3D{ 1, 1, 1 }, VK_FORMAT_R8G8B8A8_UNORM,
-        VK_IMAGE_USAGE_SAMPLED_BIT);
+    _greyImage = create_image((void*)&grey, VkExtent3D{ 1, 1, 1 }, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT);
     uint32_t black = glm::packUnorm4x8(glm::vec4(0, 0, 0, 1));
-    _blackImage = create_image((void*)&black, VkExtent3D{ 1, 1, 1 }, VK_FORMAT_R8G8B8A8_UNORM,
-        VK_IMAGE_USAGE_SAMPLED_BIT);
+    _blackImage = create_image((void*)&black, VkExtent3D{ 1, 1, 1 }, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT);
 
-    //checkerboard image
+    // checkerboard image
     uint32_t magenta = glm::packUnorm4x8(glm::vec4(1, 0, 1, 1));
-    std::array<uint32_t, 16 *16 > pixels; //for 16x16 checkerboard texture
+    std::array<uint32_t, 16 * 16> pixels;
     for (int x = 0; x < 16; x++) {
         for (int y = 0; y < 16; y++) {
-            pixels[y*16 + x] = ((x % 2) ^ (y % 2)) ? magenta : black;
+            pixels[y * 16 + x] = ((x % 2) ^ (y % 2)) ? magenta : black;
         }
     }
-    _errorCheckerboardImage = create_image(pixels.data(), VkExtent3D{16, 16, 1}, VK_FORMAT_R8G8B8A8_UNORM,
-        VK_IMAGE_USAGE_SAMPLED_BIT);
+    _errorCheckerboardImage = create_image(pixels.data(), VkExtent3D{ 16, 16, 1 }, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT);
 
-    VkSamplerCreateInfo sampl = {.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
-
+    VkSamplerCreateInfo sampl = { .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
     sampl.magFilter = VK_FILTER_NEAREST;
     sampl.minFilter = VK_FILTER_NEAREST;
-
     vkCreateSampler(_device, &sampl, nullptr, &_defaultSamplerNearest);
 
     sampl.magFilter = VK_FILTER_LINEAR;
     sampl.minFilter = VK_FILTER_LINEAR;
     vkCreateSampler(_device, &sampl, nullptr, &_defaultSamplerLinear);
 
-    _mainDeletionQueue.push_function([&](){
-        vkDestroySampler(_device,_defaultSamplerNearest,nullptr);
-        vkDestroySampler(_device,_defaultSamplerLinear,nullptr);
+    _mainDeletionQueue.push_function([&]() {
+        vkDestroySampler(_device, _defaultSamplerNearest, nullptr);
+        vkDestroySampler(_device, _defaultSamplerLinear, nullptr);
 
         destroy_image(_whiteImage);
         destroy_image(_greyImage);
@@ -978,8 +938,7 @@ void VulkanEngine::init_default_data() {
         destroy_image(_errorCheckerboardImage);
     });
 
-
-    _testMeshes = loadGltfMeshes(this, "../assets/basicmesh.glb").value();
+    // Removed the hardcoded loading of _testMeshes
 }
 
 void VulkanEngine::immediate_submit(std::function<void(VkCommandBuffer cmd)>&& function) {

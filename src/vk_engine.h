@@ -8,6 +8,7 @@
 
 #include "vk_descriptors.h"
 #include "vk_loader.h"
+#include "camera.h"
 
 #define VK_DEBUG
 
@@ -115,10 +116,9 @@ public:
 
     VkPipelineLayout _meshPipelineLayout;
     VkPipeline _meshPipeline;
-
-    GPUMeshBuffers rectangle; // hardcoded rectangle buffer
-
-    std::vector<std::shared_ptr<MeshAsset>> _testMeshes;
+    // Dynamically load meshes
+    std::vector<std::shared_ptr<MeshAsset>> _loadedMeshes;
+    int _selectedMeshIndex = -1;
 
     std::chrono::high_resolution_clock::time_point lastTime;
     double totalTime = 0; // seconds
@@ -137,20 +137,8 @@ public:
     VkDescriptorSetLayout _singleImageDescriptorLayout;
     VkDescriptorSetLayout _gpuSceneDataDescriptorLayout;
 
-    // Camera state
-    glm::vec3 cameraPos{0.0f, 0.0f, -5.0f};
-    float cameraSpeed = 5.0f; // units per second
-    
-    // Camera orientation
-    float pitch = 0.0f;    // Looking up/down
-    float yaw = 0.0f;      // Looking left/right
-    float mouseSensitivity = 0.1f;
-    bool mouseCaptured = false;
-    
-    // Camera vectors
-    glm::vec3 cameraFront{0.0f, 0.0f, 1.0f};  // Direction camera is facing
-    glm::vec3 cameraRight{1.0f, 0.0f, 0.0f};  // Right vector
-    glm::vec3 cameraUp{0.0f, 1.0f, 0.0f};     // Up vector
+    Camera _camera;
+    bool _mouseCaptured = false;
 
     bool resize_requested{false};
 
