@@ -42,7 +42,7 @@ constexpr bool bUseValidationLayers = true;
 
 VulkanEngine *loadedEngine = nullptr;
 
-VulkanEngine &VulkanEngine::Get() { return *loadedEngine; }
+auto VulkanEngine::Get() -> VulkanEngine & { return *loadedEngine; }
 
 void VulkanEngine::init() {
     // only one engine initialization is allowed with the application.
@@ -70,12 +70,13 @@ void VulkanEngine::init() {
     SDL_Vulkan_GetDrawableSize(_window, &width, &height);
     _renderScale = _windowExtent.width / static_cast<float>(width);
     fmt::println("Render Scale: {}\n", _renderScale);
+    lastTime = std::chrono::high_resolution_clock::now();
 
     init_vulkan();
     init_swapchain();
     init_commands();
     init_sync_structures();
-    init_desciptors();
+    init_descriptors();
     init_pipelines();
     init_imgui();
 
@@ -88,6 +89,7 @@ void VulkanEngine::cleanup() {
         const double fps = totalFrames / totalTime;
         const double avgms = totalTime/ totalFrames * 1000;
         fmt::println("Frames Per Second (FPS): {:.3f}", fps);
+        fmt::println("total frames rendered: {} ", totalFrames);
         fmt::println("total runtime: {:.2f} seconds", totalTime);
         fmt::println("average frame ms: {:.3f}ms", avgms);
         vkDeviceWaitIdle(_device);
@@ -127,10 +129,9 @@ void VulkanEngine::draw()
     //wait until the GPU has finished rendering the last frame. Timeout of 1 second
     VK_CHECK(vkWaitForFences(_device, 1, &get_current_frame()._renderFence, true, 1000000000));
 
-    get_current_frame()._deletionQueue.flush();
-    get_current_frame()._frameDescriptors.clear_pools(_device);
     // delete the old per frame data
     get_current_frame()._deletionQueue.flush();
+    get_current_frame()._frameDescriptors.clear_pools(_device);
 
     VK_CHECK(vkResetFences(_device, 1, &get_current_frame()._renderFence));
     // set drawextent every frame, for resolution scale and resize
@@ -223,30 +224,6 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd)
 
     VkRenderingInfo renderInfo = vkinit::rendering_info(_drawExtent, &colorAttachment, &depthAttachment);
     vkCmdBeginRendering(cmd, &renderInfo);
-    // Bind the pipeline
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _meshPipeline);
-
-
-    //allocate a new uniform buffer for the scene data
-    AllocatedBuffer gpuSceneDataBuffer = create_buffer(sizeof(GPUSceneData), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-
-    //add it to the deletion queue of this frame so it gets deleted once its been used
-    get_current_frame()._deletionQueue.push_function([=, this]() {
-        destroy_buffer(gpuSceneDataBuffer);
-        });
-
-    //write the buffer
-    GPUSceneData* sceneUniformData = (GPUSceneData*)gpuSceneDataBuffer.allocation->GetMappedData();
-    *sceneUniformData = sceneData;
-
-    //create a descriptor set that binds that buffer and update it
-    VkDescriptorSet globalDescriptor = get_current_frame()._frameDescriptors.allocate(_device, _gpuSceneDataDescriptorLayout);
-
-    DescriptorWriter writer;
-    writer.write_buffer(0, gpuSceneDataBuffer.buffer, sizeof(GPUSceneData), 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
-    writer.update_set(_device, globalDescriptor);
-    // Bind the descriptor set
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _meshPipelineLayout, 0, 1, &globalDescriptor, 0, nullptr);
 
     //set dynamic viewport and scissor
     VkViewport viewport = {};
@@ -262,23 +239,29 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd)
     VkRect2D scissor = {};
     scissor.offset.x = 0;
     scissor.offset.y = 0;
-    scissor.extent.width = _drawExtent.width;
-    scissor.extent.height = _drawExtent.height;
+    scissor.extent.width = viewport.width;
+    scissor.extent.height = viewport.height;
     vkCmdSetScissor(cmd, 0, 1, &scissor);
 
-    GPUDrawPushConstants push_constants{};
-    push_constants.worldMatrix = glm::mat4{ 1.0f };
-    push_constants.vertexBuffer = rectangle.vertexBufferAddress;
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _meshPipeline);
 
-    vkCmdPushConstants(cmd, _meshPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(GPUDrawPushConstants), &push_constants);
-    vkCmdBindIndexBuffer(cmd, rectangle.indexBuffer.buffer, 0, VK_INDEX_TYPE_UINT32);
+    //bind a texture
+    VkDescriptorSet imageSet = get_current_frame()._frameDescriptors.allocate(_device, _singleImageDescriptorLayout);
+    {
+        DescriptorWriter writer;
+        writer.write_image(0, _errorCheckerboardImage.imageView, _defaultSamplerNearest, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        writer.update_set(_device, imageSet);
+    }
 
-    vkCmdDrawIndexed(cmd, 6, 1, 0, 0, 0);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _meshPipelineLayout, 0, 1, &imageSet, 0, nullptr);
 
-    //DRAW TEST MESH (basicmesh.glb)
-    //float time = SDL_GetTicks() / 1000.0f;
-    //time = (glm::sin(time) + 1.0f) / .5f; // Sine range 0-1
-    const glm::mat4 view = glm::translate(glm::vec3{ 0,0,-5 });
+    // Create view matrix from camera position and orientation
+    const glm::mat4 view = glm::lookAt(
+        cameraPos,                    // Camera position
+        cameraPos + cameraFront,      // Look at point (in front of camera)
+        cameraUp                      // Up vector
+    );
+
     // camera projection
     glm::mat4 projection = glm::perspective(glm::radians(70.f), (float)_drawExtent.width / (float)_drawExtent.height, 10000.f, 0.1f);
 
@@ -286,6 +269,7 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd)
     // to opengl and gltf axis
     projection[1][1] *= -1;
 
+    GPUDrawPushConstants push_constants{};
     push_constants.worldMatrix = projection * view;
     push_constants.vertexBuffer = _testMeshes[2]->meshBuffers.vertexBufferAddress;
 
@@ -314,6 +298,13 @@ void VulkanEngine::draw_background(VkCommandBuffer cmd)
 
     // bind the descriptor set containing the draw image for the compute pipeline
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _gradientPipelineLayout, 0, 1, &_drawImageDescriptors, 0, nullptr);
+
+    // Update the view matrix from camera
+    effect.data.viewMatrix = glm::lookAt(
+        cameraPos,                    // Camera position
+        cameraPos + cameraFront,      // Look at point (in front of camera)
+        cameraUp                      // Up vector
+    );
 
     vkCmdPushConstants(cmd, _gradientPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ComputePushConstants), &effect.data);
     // execute the compute pipeline dispatch. We are using 16x16 workgroup size so we need to divide by it
@@ -356,9 +347,66 @@ void VulkanEngine::run() {
                         debug_log("Disabling Fullscreen");
                         SDL_SetWindowFullscreen(_window, 0);
                     }
+                } else if (e.key.keysym.scancode == SDL_SCANCODE_M) {
+                    mouseCaptured = !mouseCaptured;
+                    SDL_SetRelativeMouseMode(mouseCaptured ? SDL_TRUE : SDL_FALSE);
                 }
             }
             ImGui_ImplSDL2_ProcessEvent(&e);
+        }
+
+        // Handle mouse movement for camera look
+        if (mouseCaptured) {
+            int mouseX, mouseY;
+            SDL_GetRelativeMouseState(&mouseX, &mouseY);
+            
+            yaw += mouseX * mouseSensitivity;
+            pitch -= mouseY * mouseSensitivity; // Negative because SDL's Y is inverted
+            
+            // Clamp pitch to prevent flipping
+            pitch = std::clamp(pitch, -89.0f, 89.0f);
+            
+            // Update camera vectors
+            glm::vec3 direction;
+            direction.x = cos(glm::radians(yaw)) * cos(glm::radians(pitch));
+            direction.y = sin(glm::radians(pitch));
+            direction.z = sin(glm::radians(yaw)) * cos(glm::radians(pitch));
+            cameraFront = glm::normalize(direction);
+            cameraRight = glm::normalize(glm::cross(cameraFront, glm::vec3(0.0f, 1.0f, 0.0f)));
+            cameraUp = glm::normalize(glm::cross(cameraRight, cameraFront));
+        }
+
+        // Handle keyboard input for movement
+        const Uint8* state = SDL_GetKeyboardState(nullptr);
+        if (!stop_rendering) {
+            const auto now = std::chrono::high_resolution_clock::now();
+            const double deltaTime = std::chrono::duration<double, std::milli>(now - lastTime).count() / 1000.0;
+            
+            const float moveAmount = cameraSpeed * deltaTime;
+            
+            // Forward/Backward (W/S)
+            if (state[SDL_SCANCODE_W]) {
+                cameraPos += cameraFront * moveAmount;
+            }
+            if (state[SDL_SCANCODE_S]) {
+                cameraPos -= cameraFront * moveAmount;
+            }
+            
+            // Left/Right (A/D)
+            if (state[SDL_SCANCODE_A]) {
+                cameraPos -= cameraRight * moveAmount;
+            }
+            if (state[SDL_SCANCODE_D]) {
+                cameraPos += cameraRight * moveAmount;
+            }
+            
+            // Up/Down (Space/Left Shift)
+            if (state[SDL_SCANCODE_SPACE]) {
+                cameraPos += cameraUp * moveAmount;
+            }
+            if (state[SDL_SCANCODE_LSHIFT]) {
+                cameraPos -= cameraUp * moveAmount;
+            }
         }
 
         // do not draw if we are minimized
@@ -372,37 +420,60 @@ void VulkanEngine::run() {
             debug_log("Resized");
             fmt::println("New Res: {0}x{1}", _windowExtent.width, _windowExtent.height);
         }
+        const auto now = std::chrono::high_resolution_clock::now();
+        const double deltaTime = std::chrono::duration<double, std::milli>(now - lastTime).count() / 1000.0;
+        lastTime = now;
+        totalTime += deltaTime;
+        totalFrames += 1;
         // imgui new frame
         ImGui_ImplVulkan_NewFrame();
         ImGui_ImplSDL2_NewFrame();
         ImGui::NewFrame();
 
         if (ImGui::Begin("background")) {
+
+            const std::string timeStr = fmt::format(FMT_STRING("Time: {} ms"), (deltaTime*1000.0));
+            //debug_log(timeStr.c_str());
+            ImGui::Text(timeStr.c_str());
+            const std::string fpsStr = fmt::format(FMT_STRING("FPS: {}"), totalFrames/totalTime);
+            //debug_log(fpsStr.c_str());
+            ImGui::Text(fpsStr.c_str());
+
             ImGui::SliderFloat("Render Scale",&_renderScale, 0.1f, 1.f);
+            ImGui::SliderFloat("Camera Speed", &cameraSpeed, 1.0f, 20.0f);
+            ImGui::SliderFloat("Mouse Sensitivity", &mouseSensitivity, 0.01f, 1.0f);
+            ImGui::Text("Camera Position: %.2f, %.2f, %.2f", cameraPos.x, cameraPos.y, cameraPos.z);
+            ImGui::Text("Camera Direction: %.2f, %.2f, %.2f", cameraFront.x, cameraFront.y, cameraFront.z);
+            ImGui::Text("Pitch: %.2f, Yaw: %.2f", pitch, yaw);
+            ImGui::Text("Press 'M' to toggle mouse capture");
 
             ComputeEffect& selected = _backgroundEffects[currentBackgroundEffect];
             ImGui::Text("Selected effect: %s", selected.name);
             ImGui::SliderInt("Effect Index", &currentBackgroundEffect, 0,
                              static_cast<int>(_backgroundEffects.size()) - 1);
 
-            ImGui::InputFloat4("data1",(float*)& selected.data.data1);
-            ImGui::InputFloat4("data2",(float*)& selected.data.data2);
-            ImGui::InputFloat4("data3",(float*)& selected.data.data3);
-            ImGui::InputFloat3("data4",(float*)& selected.data.data4);
-
-            const std::string timeStr = fmt::format(FMT_STRING("Last Time: {} ms"), (ImGui::GetIO().DeltaTime*1000.0f));
-            //debug_log(timeStr.c_str());
-            ImGui::Text(timeStr.c_str());
-            const std::string fpsStr = fmt::format(FMT_STRING("Last 120 FPS: {}"), (ImGui::GetIO().Framerate));
-            //debug_log(fpsStr.c_str());
-            ImGui::Text(fpsStr.c_str());
+            ImGui::Text("Render Resolution: %.0fx%.0f", _windowExtent.width*_renderScale, _windowExtent.height*_renderScale);
+            int w = _requestedExtent.width, h = _requestedExtent.height;
+            ImGui::InputInt("width",& w);
+            ImGui::InputInt("height",& h);
+            _requestedExtent.width = static_cast<uint32_t>(w);
+            _requestedExtent.height = static_cast<uint32_t>(h);
+            if (ImGui::Button("change resolution")) {
+                if(w != _windowExtent.width || h != _windowExtent.height) {
+                    SDL_SetWindowSize(_window, _requestedExtent.width, _requestedExtent.height);
+                    resize_requested = true;
+                }
+            }
         }
         ImGui::End();
         ImGui::Render();
-        totalTime += ImGui::GetIO().DeltaTime;
-        totalFrames += 1;
-        _backgroundEffects[currentBackgroundEffect].data.time = SDL_GetTicks64();
 
+        _backgroundEffects[currentBackgroundEffect].data.time = SDL_GetTicks64();
+        if (totalTime > 1.0) {
+            //fmt::println("FPS: {}", tpa);
+            totalTime = 0.0;
+            totalFrames = 0;
+        }
         draw();
     }
 }
@@ -439,6 +510,7 @@ void VulkanEngine::init_vulkan()
             .set_minimum_version(1, 3)
             .set_required_features_13(features13)
             .set_required_features_12(features12)
+            .prefer_gpu_device_type(vkb::PreferredDeviceType::integrated)
             .set_surface(_surface)
             .select().value();
     // Create the final Vulkan Device
@@ -573,7 +645,7 @@ void VulkanEngine::create_swapchain(uint32_t width, uint32_t height)
     _swapchainImageFormat = VK_FORMAT_B8G8R8A8_UNORM;
     vkb::Swapchain vkbSwapchain = swapchainBuilder
             .set_desired_format(VkSurfaceFormatKHR{.format = _swapchainImageFormat, .colorSpace = VK_COLORSPACE_SRGB_NONLINEAR_KHR})
-            .set_desired_present_mode(VK_PRESENT_MODE_FIFO_RELAXED_KHR)
+            .set_desired_present_mode(VK_PRESENT_MODE_FIFO_KHR)
             .set_desired_extent(width, height)
             .add_image_usage_flags(VK_IMAGE_USAGE_TRANSFER_DST_BIT)
             .build()
@@ -609,7 +681,7 @@ void VulkanEngine::destroy_swapchain()
     }
 }
 
-void VulkanEngine::init_desciptors() {
+void VulkanEngine::init_descriptors() {
     //create a descriptor pool that will hold 10 sets with 1 image each
     std::vector<DescriptorAllocator::PoolSizeRatio> sizes =
     {{ VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1 }};
@@ -659,6 +731,15 @@ void VulkanEngine::init_desciptors() {
             _frames[i]._frameDescriptors.destroy_pools(_device);
         });
     }
+
+    { // single image
+        DescriptorLayoutBuilder builder;
+        builder.add_binding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        _singleImageDescriptorLayout = builder.build(_device, VK_SHADER_STAGE_FRAGMENT_BIT);
+    }
+    _mainDeletionQueue.push_function([=]() {
+        vkDestroyDescriptorSetLayout(_device, _singleImageDescriptorLayout, nullptr);
+    });
 }
 
 void VulkanEngine::init_pipelines()
@@ -701,8 +782,8 @@ void VulkanEngine::init_background_pipelines()
     }
 
     VkShaderModule planetShader;
-    if (!vkutil::load_shader_module("../shaders/planets.comp.spv", _device, &planetShader)) {
-        fmt::print("Error when building the c shader \n");
+    if (!vkutil::load_shader_module("../shaders/planets_backup.comp.spv", _device, &planetShader)) {
+        fmt::print("Error when building the Planets shader \n");
     }
     VkShaderModule ClaudeShader;
     if (!vkutil::load_shader_module("../shaders/claude.comp.spv", _device, &ClaudeShader)) {
@@ -725,10 +806,7 @@ void VulkanEngine::init_background_pipelines()
     gradient.layout = _gradientPipelineLayout;
     gradient.name = "gradient";
     gradient.data = {};
-
-    //default colors
-    gradient.data.data1 = glm::vec4(1, 0, 0, 1);
-    gradient.data.data2 = glm::vec4(0, 0, 1, 1);
+    gradient.data.viewMatrix = glm::mat4(1.0f); // Identity matrix for default view
 
     VK_CHECK(
         vkCreateComputePipelines(_device, VK_NULL_HANDLE, 1, &computePipelineCreateInfo, nullptr, &gradient.pipeline));
@@ -740,8 +818,7 @@ void VulkanEngine::init_background_pipelines()
     sky.layout = _gradientPipelineLayout;
     sky.name = "sky";
     sky.data = {};
-    //default sky parameters
-    sky.data.data1 = glm::vec4(0.1, 0.2, 0.4, 0.97);
+    sky.data.viewMatrix = glm::mat4(1.0f);
 
     VK_CHECK(vkCreateComputePipelines(_device, VK_NULL_HANDLE, 1, &computePipelineCreateInfo, nullptr, &sky.pipeline));
 
@@ -751,8 +828,7 @@ void VulkanEngine::init_background_pipelines()
     planet.layout = _gradientPipelineLayout;
     planet.name = "planets";
     planet.data = {};
-    //default sky parameters
-    planet.data.data1 = glm::vec4(0.5, 0.95, 0.4, 0.97);
+    planet.data.viewMatrix = glm::mat4(1.0f);
 
     VK_CHECK(vkCreateComputePipelines(_device, VK_NULL_HANDLE, 1, &computePipelineCreateInfo, nullptr, &planet.pipeline));
 
@@ -762,8 +838,7 @@ void VulkanEngine::init_background_pipelines()
     claude.layout = _gradientPipelineLayout;
     claude.name = "claude";
     claude.data = {};
-    //default sky parameters
-    claude.data.data1 = glm::vec4(0.5, 0.95, 0.4, 0.97);
+    claude.data.viewMatrix = glm::mat4(1.0f);
 
     VK_CHECK(vkCreateComputePipelines(_device, VK_NULL_HANDLE, 1, &computePipelineCreateInfo, nullptr, &claude.pipeline));
 
@@ -789,23 +864,23 @@ void VulkanEngine::init_background_pipelines()
 
 void VulkanEngine::init_mesh_pipeline() {
     VkShaderModule triangleFragShader;
-    if (!vkutil::load_shader_module("../shaders/colored_triangle.frag.spv", _device, &triangleFragShader)) {
+    if (!vkutil::load_shader_module("../shaders/tex_image.frag.spv", _device, &triangleFragShader)) {
         fmt::print("Error when building the triangle fragment shader module");
     }
     else {
-        fmt::print("Triangle fragment shader successfully loaded");
+        fmt::println("Triangle fragment shader successfully loaded");
     }
 
     VkShaderModule triangleVertexShader;
     if (!vkutil::load_shader_module("../shaders/mesh_colored_triangle.vert.spv", _device, &triangleVertexShader)) {
-        fmt::print("Error when building the triangle vertex shader module");
+        fmt::println("Error when building the triangle vertex shader module");
     }
     else {
-        fmt::print("Triangle vertex shader successfully loaded");
+        fmt::println("Triangle vertex shader successfully loaded");
     }
 
     // Descriptor Set Layout for the scene data (add this to pipeline layout)
-    VkDescriptorSetLayout *setLayout = &_gpuSceneDataDescriptorLayout;
+    //VkDescriptorSetLayout *setLayout = &_gpuSceneDataDescriptorLayout;
 
     VkPushConstantRange bufferRange{};
     bufferRange.offset = 0;
@@ -815,8 +890,9 @@ void VulkanEngine::init_mesh_pipeline() {
     VkPipelineLayoutCreateInfo pipeline_layout_info = vkinit::pipeline_layout_create_info();
     pipeline_layout_info.pPushConstantRanges = &bufferRange;
     pipeline_layout_info.pushConstantRangeCount = 1;
+    pipeline_layout_info.pSetLayouts = &_singleImageDescriptorLayout;
     pipeline_layout_info.setLayoutCount = 1;
-    pipeline_layout_info.pSetLayouts = setLayout;
+    //pipeline_layout_info.pSetLayouts = setLayout;
 
     VK_CHECK(vkCreatePipelineLayout(_device, &pipeline_layout_info, nullptr, &_meshPipelineLayout));
 
@@ -836,8 +912,8 @@ void VulkanEngine::init_mesh_pipeline() {
     //no multisampling
     pipelineBuilder.set_multisampling_none();
     //no blending
-    //pipelineBuilder.disable_blending();
-    pipelineBuilder.enable_blending_additive();
+    pipelineBuilder.disable_blending();
+    //pipelineBuilder.enable_blending_additive();
 
     pipelineBuilder.enable_depthtest(true, VK_COMPARE_OP_GREATER_OR_EQUAL);
     //connect the image format we will draw into, from draw image
@@ -859,38 +935,51 @@ void VulkanEngine::init_mesh_pipeline() {
 }
 
 void VulkanEngine::init_default_data() {
-    std::array<Vertex,4> rect_vertices{};
+    //3 default textures, white, grey, black. 1 pixel each
+    uint32_t white = glm::packUnorm4x8(glm::vec4(1, 1, 1, 1));
+    _whiteImage = create_image((void*)&white, VkExtent3D{ 1, 1, 1 }, VK_FORMAT_R8G8B8A8_UNORM,
+        VK_IMAGE_USAGE_SAMPLED_BIT);
+    uint32_t grey = glm::packUnorm4x8(glm::vec4(0.66f, 0.66f, 0.66f, 1));
+    _greyImage = create_image((void*)&grey, VkExtent3D{ 1, 1, 1 }, VK_FORMAT_R8G8B8A8_UNORM,
+        VK_IMAGE_USAGE_SAMPLED_BIT);
+    uint32_t black = glm::packUnorm4x8(glm::vec4(0, 0, 0, 1));
+    _blackImage = create_image((void*)&black, VkExtent3D{ 1, 1, 1 }, VK_FORMAT_R8G8B8A8_UNORM,
+        VK_IMAGE_USAGE_SAMPLED_BIT);
 
-    rect_vertices[0].position = {0.5,-0.5, 0};
-    rect_vertices[1].position = {0.5,0.5, 0};
-    rect_vertices[2].position = {-0.5,-0.5, 0};
-    rect_vertices[3].position = {-0.5,0.5, 0};
+    //checkerboard image
+    uint32_t magenta = glm::packUnorm4x8(glm::vec4(1, 0, 1, 1));
+    std::array<uint32_t, 16 *16 > pixels; //for 16x16 checkerboard texture
+    for (int x = 0; x < 16; x++) {
+        for (int y = 0; y < 16; y++) {
+            pixels[y*16 + x] = ((x % 2) ^ (y % 2)) ? magenta : black;
+        }
+    }
+    _errorCheckerboardImage = create_image(pixels.data(), VkExtent3D{16, 16, 1}, VK_FORMAT_R8G8B8A8_UNORM,
+        VK_IMAGE_USAGE_SAMPLED_BIT);
 
-    rect_vertices[0].color = {0,0, 0,1};
-    rect_vertices[1].color = { 0.5,0.5,0.5 ,1};
-    rect_vertices[2].color = { 1,0, 0,1 };
-    rect_vertices[3].color = { 0,1, 0,1 };
+    VkSamplerCreateInfo sampl = {.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
 
-    std::array<uint32_t,6> rect_indices{};
+    sampl.magFilter = VK_FILTER_NEAREST;
+    sampl.minFilter = VK_FILTER_NEAREST;
 
-    rect_indices[0] = 0;
-    rect_indices[1] = 1;
-    rect_indices[2] = 2;
+    vkCreateSampler(_device, &sampl, nullptr, &_defaultSamplerNearest);
 
-    rect_indices[3] = 2;
-    rect_indices[4] = 1;
-    rect_indices[5] = 3;
+    sampl.magFilter = VK_FILTER_LINEAR;
+    sampl.minFilter = VK_FILTER_LINEAR;
+    vkCreateSampler(_device, &sampl, nullptr, &_defaultSamplerLinear);
 
-    rectangle = uploadMesh(rect_indices, rect_vertices);
-
-    //delete the rectangle data on engine shutdown
     _mainDeletionQueue.push_function([&](){
-        destroy_buffer(rectangle.indexBuffer);
-        destroy_buffer(rectangle.vertexBuffer);
+        vkDestroySampler(_device,_defaultSamplerNearest,nullptr);
+        vkDestroySampler(_device,_defaultSamplerLinear,nullptr);
+
+        destroy_image(_whiteImage);
+        destroy_image(_greyImage);
+        destroy_image(_blackImage);
+        destroy_image(_errorCheckerboardImage);
     });
 
-    _testMeshes = loadGltfMeshes(this, "../assets/basicmesh.glb").value();
 
+    _testMeshes = loadGltfMeshes(this, "../assets/basicmesh.glb").value();
 }
 
 void VulkanEngine::immediate_submit(std::function<void(VkCommandBuffer cmd)>&& function) {
@@ -1066,4 +1155,78 @@ GPUMeshBuffers VulkanEngine::uploadMesh(std::span<uint32_t> indices, std::span<V
     destroy_buffer(staging);
 
     return newSurface;
+}
+
+AllocatedImage VulkanEngine::create_image(VkExtent3D size, VkFormat format, VkImageUsageFlags usage, bool mipmapped) {
+    AllocatedImage newImage{};
+    newImage.imageFormat = format;
+    newImage.imageExtent = size;
+
+    VkImageCreateInfo img_info = vkinit::image_create_info(format, usage, size);
+    if (mipmapped) {
+        img_info.mipLevels = static_cast<uint32_t>(std::floor(std::log2(std::max(size.width, size.height)))) + 1;
+    }
+    // always allocate images on dedicated GPU memory
+    VmaAllocationCreateInfo allocinfo = {};
+    allocinfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+    allocinfo.requiredFlags = VkMemoryPropertyFlags(VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+
+    // allocate and create the image
+    VK_CHECK(vmaCreateImage(_allocator, &img_info, &allocinfo, &newImage.image, &newImage.allocation, nullptr));
+
+    // if the format is a depth format, we will need to have it use the correct
+    // aspect flag
+    VkImageAspectFlags aspectFlag = VK_IMAGE_ASPECT_COLOR_BIT;
+    if (format == VK_FORMAT_D32_SFLOAT) {
+        aspectFlag = VK_IMAGE_ASPECT_DEPTH_BIT;
+    }
+
+    // build an image-view for the image
+    VkImageViewCreateInfo view_info = vkinit::imageview_create_info(format, newImage.image, aspectFlag);
+    view_info.subresourceRange.levelCount = img_info.mipLevels;
+
+    VK_CHECK(vkCreateImageView(_device, &view_info, nullptr, &newImage.imageView));
+
+    return newImage;
+}
+
+AllocatedImage VulkanEngine::create_image(void* data, VkExtent3D size, VkFormat format, VkImageUsageFlags usage, bool mipmapped) {
+    const size_t data_size = size.depth * size.width * size.height * 4;
+    AllocatedBuffer uploadbuffer = create_buffer(data_size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+
+    memcpy(uploadbuffer.info.pMappedData, data, data_size);
+
+    AllocatedImage new_image = create_image(size, format, usage | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, mipmapped);
+
+    immediate_submit([&](VkCommandBuffer cmd) {
+        vkutil::transition_image(cmd, new_image.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+
+        VkBufferImageCopy copyRegion = {};
+        copyRegion.bufferOffset = 0;
+        copyRegion.bufferRowLength = 0;
+        copyRegion.bufferImageHeight = 0;
+
+        copyRegion.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        copyRegion.imageSubresource.mipLevel = 0;
+        copyRegion.imageSubresource.baseArrayLayer = 0;
+        copyRegion.imageSubresource.layerCount = 1;
+        copyRegion.imageExtent = size;
+
+        // copy the buffer into the image
+        vkCmdCopyBufferToImage(cmd, uploadbuffer.buffer, new_image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
+            &copyRegion);
+
+        vkutil::transition_image(cmd, new_image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        });
+
+    destroy_buffer(uploadbuffer);
+
+    return new_image;
+}
+
+void VulkanEngine::destroy_image(const AllocatedImage& img)
+{
+    vkDestroyImageView(_device, img.imageView, nullptr);
+    vmaDestroyImage(_allocator, img.image, img.allocation);
 }

@@ -64,3 +64,14 @@ struct GPUDrawPushConstants {
     glm::mat4 worldMatrix;
     VkDeviceAddress vertexBuffer;
 };
+
+struct RenderObject {
+    uint32_t indexCount;
+    uint32_t firstIndex;
+    VkBuffer indexBuffer;
+
+    //TODO: MaterialInstance* material;
+
+    glm::mat4 tranform;
+    VkDeviceAddress vertexBufferAddress;
+};

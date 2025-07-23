@@ -1,6 +1,4 @@
 #version 450
-//  Rotating planets, with a starry gradient background, if rendered correctly
-
 layout (local_size_x = 16, local_size_y = 16) in;
 layout(rgba8, set = 0, binding = 0) uniform image2D image;
 layout(push_constant) uniform constants {
@@ -9,200 +7,87 @@ layout(push_constant) uniform constants {
     vec4 data3;
     vec3 data4;
     highp uint time;
-} PushConstants;
+} PC;
+#define PI 3.14159265359
+#define TAU 6.28318530718
 
-// Hash function for noise
-float hash(vec2 p) {
-    vec3 p3 = fract(vec3(p.xyx) * 0.13);
-    p3 += dot(p3, p3.yzx + 3.333);
-    return fract((p3.x + p3.y) * p3.z);
+vec3 palette(float t) {
+    return 0.5 + 0.5 * cos(TAU * (t + vec3(0.0, 0.33, 0.67)));
 }
 
-// 2D noise function
-float noise2D(vec2 p) {
-    vec2 i = floor(p);
-    vec2 f = fract(p);
-    f = f * f * (3.0 - 2.0 * f);
-    float a = hash(i);
-    float b = hash(i + vec2(1.0, 0.0));
-    float c = hash(i + vec2(0.0, 1.0));
-    float d = hash(i + vec2(1.0, 1.0));
-    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+float sphereSDF(vec3 p, float r) {
+    return length(p) - r;
 }
 
-// 3D noise function
-float noise3D(vec3 p) {
-    vec3 i = floor(p);
-    vec3 f = fract(p);
-    f = f * f * (3.0 - 2.0 * f);
+float sceneSDF(vec3 p) {
+    float mergeProgress = smoothstep(0.0, 1.0, mod(float(PC.time) * 0.001, 1.0));
 
-    float n = i.x + i.y * 157.0 + 113.0 * i.z;
-    vec4 v1 = fract(sin(vec4(n + 0.0, n + 1.0, n + 157.0, n + 158.0)) * 43758.5453);
-    vec4 v2 = fract(sin(vec4(n + 113.0, n + 114.0, n + 270.0, n + 271.0)) * 43758.5453);
+    vec3 pos1 = vec3(-1.0, 1.0, -5.0);
+    vec3 pos2 = vec3(1.0, 1.0, -5.0);
+    vec3 pos3 = vec3(-1.0, -1.0, -5.0);
+    vec3 pos4 = vec3(1.0, -1.0, -5.0);
+    vec3 pos5 = vec3(0.0, 1.5, -5.0);
+    vec3 pos6 = vec3(0.0, -1.5, -5.0);
 
-    float x1 = mix(v1.x, v1.y, f.x);
-    float x2 = mix(v1.z, v1.w, f.x);
-    float y1 = mix(x1, x2, f.y);
+    vec3 center1 = mix(vec3(0.0), pos1, mergeProgress);
+    vec3 center2 = mix(vec3(0.0), pos2, mergeProgress);
+    vec3 center3 = mix(vec3(0.0), pos3, mergeProgress);
+    vec3 center4 = mix(vec3(0.0), pos4, mergeProgress);
+    vec3 center5 = mix(vec3(0.0), pos5, mergeProgress);
+    vec3 center6 = mix(vec3(0.0), pos6, mergeProgress);
 
-    float x3 = mix(v2.x, v2.y, f.x);
-    float x4 = mix(v2.z, v2.w, f.x);
-    float y2 = mix(x3, x4, f.y);
+    float d1 = sphereSDF(p - center1, 0.5);
+    float d2 = sphereSDF(p - center2, 0.5);
+    float d3 = sphereSDF(p - center3, 0.5);
+    float d4 = sphereSDF(p - center4, 0.5);
+    float d5 = sphereSDF(p - center5, 0.5);
+    float d6 = sphereSDF(p - center6, 0.5);
 
-    return mix(y1, y2, f.z);
+    return min(min(min(d1, d2), min(d3, d4)), min(d5, d6));
 }
 
-// Sphere intersection function
-bool intersectSphere(vec3 ro, vec3 rd, vec3 center, float radius, out float t) {
-    vec3 oc = ro - center;
-    float b = dot(oc, rd);
-    float c = dot(oc, oc) - radius * radius;
-    float h = b * b - c;
-
-    if (h < 0.0) return false;
-
-    h = sqrt(h);
-    t = -b - h;
-
-    return t > 0.0;
+vec3 estimateNormal(vec3 p) {
+    const vec2 e = vec2(0.001, 0.0);
+    return normalize(vec3(
+                     sceneSDF(p + e.xyy) - sceneSDF(p - e.xyy),
+                     sceneSDF(p + e.yxy) - sceneSDF(p - e.yxy),
+                     sceneSDF(p + e.yyx) - sceneSDF(p - e.yyx)
+                     ));
 }
-
-float DistributionGGX(vec3 N, vec3 H, float roughness) {
-    float alpha = roughness * roughness;
-    float NdotH = max(dot(N, H), 0.0);
-    float NdotH2 = NdotH * NdotH;
-    float denom = (NdotH2 * (alpha - 1.0) + 1.0);
-    // Specular highlight'ı yumuşatmak için alpha değerini düşürüyoruz
-    return (alpha * 0.3) / (3.14159 * denom * denom);
-}
-
-
-// Planet structure to organize planet data
-struct Planet {
-    vec3 center;
-    float radius;
-    vec3 color;
-    float rotSpeed;
-};
-
-vec3 calculatePlanetColor(vec3 intersectionPoint, vec3 normal, vec3 lightPos, Planet planet, mat3 rotMatrix) {
-    // Generate surface details based on planet size
-    const vec3 rotatedNormal = rotMatrix * normal;
-    float planetType = noise3D(vec3(planet.radius * 1000.0)); // random type, used to determine if there is bands or noise
-    vec3 bandNoise = vec3(noise3D(vec3(rotatedNormal.x * 2.0, rotatedNormal.y * 20.0, rotatedNormal.z * 2.0) + intersectionPoint * 0.15));
-    vec3 spotNoise = vec3(noise3D(rotatedNormal * 8.0 + intersectionPoint * 0.3));
-    // Mix noise patterns based on planet type ||| 1.0=bands planet , 0.0=noise planet
-    vec3 noiseColor = (planetType > 0.5) ? mix(spotNoise, bandNoise, 0.8) : mix(bandNoise, spotNoise, 0.8);
-    noiseColor = pow(noiseColor, vec3(1.5));
-
-    // Calculate lighting
-    vec3 perturbedNormal = normalize(normal + (noiseColor - 0.5) * 0.8); // bumpy surface
-    vec3 lightDir = normalize(lightPos - intersectionPoint);
-    float diff = pow(0.5 * (dot(perturbedNormal, lightDir) + 1.0), 1.5);
-
-    vec3 viewDir = normalize(-intersectionPoint);
-    vec3 halfwayDir = normalize(lightDir + viewDir);
-    float spec = DistributionGGX(perturbedNormal, halfwayDir, 0.8); // specular highlights
-
-    vec3 ambientColor = vec3(0.05, 0.1, 0.2);
-    vec3 noisyPlanetColor = planet.color * (1.0 + (noiseColor - 0.5) * 0.6); // noisy texture
-
-    return noisyPlanetColor * (diff * 0.7 + ambientColor) + spec * 0.3;
-}
-
 
 void main() {
-    ivec2 pixel_coords = ivec2(gl_GlobalInvocationID.xy);
-    vec2 iResolution = imageSize(image);
-    vec2 uv = vec2(pixel_coords) / iResolution;
-    float t = float(PushConstants.time) * 0.001;
+    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+    vec2 res = vec2(imageSize(image));
+    vec2 uv = (vec2(pix) - 0.5 * res) / res.y;
 
-    // Ray direction setup
-    vec3 dir = vec3((uv * 2.0 - 1.0) * vec2(iResolution.x / iResolution.y, 1.0), 1.0);
-    dir = normalize(dir);
+    vec3 ro = vec3(0.0, 0.0, 3.0);
+    vec3 rd = normalize(vec3(uv, -1.0));
 
-    // Define planets
-    Planet planets[4];
-    planets[0] = Planet(
-        vec3(0.0, 0.0, -3.0),
-        0.3,
-        vec3(0.2, 0.4, 0.8),
-        0.5
-    );
-    planets[1] = Planet(
-        vec3(1.5, 0.2, -4.0),
-        0.65,
-        vec3(0.8, 0.2, 0.2),
-        0.7
-    );
-    planets[2] = Planet(
-        vec3(-1.2, -0.3, -3.5),
-        0.55,
-        vec3(0.8, 0.7, 0.2),
-        0.3
-    );
-    planets[3] = Planet(
-        vec3(0.5, -0.8, -5.0),
-        0.95,
-        vec3(0.6, 0.2, 0.8),
-        0.4
-    );
+    float t = 0.0;
+    vec3 col = vec3(0.0);
+    bool hit = false;
 
-    // Light source
-    vec3 lightPos = vec3(10.1, .01, -3.0);
-
-    // New gradient background
-    vec3 topColor = vec3(0.18, 0.1, 0.1);    // Koyu gri
-    vec3 bottomColor = vec3( 0.1, 0.2, 0.4 );  // Koyu mavi
-    vec3 finalColor = mix(bottomColor, topColor, uv.y);
-
-    // Yıldızlar ekleyelim
-    float starNoise = hash(uv * 512.0);  // Daha küçük yıldızlar için yüksek frekans
-    if(starNoise > 0.997) {  // Sadece çok yüksek değerlerde yıldız göster (seyrek)
-        float phase = hash(uv * 1024.0);
-        float twinkle = 0.5 + 0.5 * sin(t * 2.0 + phase * 6.28318);
-        finalColor += vec3(0.4 * twinkle);
-    }
-
-    // Find closest planet intersection
-    float closest_t = 1e10;
-    int closest_planet = -1;
-
-    for(int i = 0; i < 4; i++) {
-        mat3 rotMatrix = mat3(
-            cos(t * planets[i].rotSpeed), 0.0, sin(t * planets[i].rotSpeed),
-            0.0, 1.0, 0.0,
-            -sin(t * planets[i].rotSpeed), 0.0, cos(t * planets[i].rotSpeed)
-        );
-        vec3 rotatedCenter = rotMatrix * planets[i].center;
-
-        float intersection_t;
-        if(intersectSphere(vec3(0.0, 0.0, 0.0), dir, rotatedCenter, planets[i].radius, intersection_t)) {
-            if(intersection_t < closest_t) {
-                closest_t = intersection_t;
-                closest_planet = i;
-            }
+    for (int i = 0; i < 100; i++) {
+        vec3 p = ro + t * rd;
+        float d = sceneSDF(p);
+        if (d < 0.001) {
+            vec3 normal = estimateNormal(p);
+            float diff = max(dot(normal, normalize(vec3(1.0, 1.0, 1.0))), 0.0);
+            col = palette(t * 0.1 + float(PC.time) * 0.0003) * diff;
+            hit = true;
+            break;
         }
+        t += d;
+        if (t > 10.0) break;
     }
 
-    if(closest_planet >= 0) {
-        mat3 rotMatrix = mat3(
-            cos(t * planets[closest_planet].rotSpeed), 0.0, sin(t * planets[closest_planet].rotSpeed),
-            0.0, 1.0, 0.0,
-            -sin(t * planets[closest_planet].rotSpeed), 0.0, cos(t * planets[closest_planet].rotSpeed)
-        );
-        vec3 rotatedCenter = rotMatrix * planets[closest_planet].center;
-
-        vec3 intersectionPoint = vec3(0.0, 0.0, 0.0) + dir * closest_t;
-        vec3 normal = normalize(intersectionPoint - rotatedCenter);
-
-        finalColor = calculatePlanetColor(
-            intersectionPoint,
-            normal,
-            lightPos,
-            planets[closest_planet],
-            rotMatrix
-        );
+    // Add background gradient if no hit
+    if (!hit) {
+        col = mix(vec3(0.1, 0.2, 0.3), vec3(0.2, 0.3, 0.5), uv.y + 0.5);
     }
 
-    imageStore(image, pixel_coords, vec4(finalColor, 1.0));
+    // Apply gamma correction
+    col = pow(col, vec3(0.4545));
+
+    imageStore(image, pix, vec4(col, 1.0));
 }

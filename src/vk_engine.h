@@ -37,10 +37,7 @@ struct FrameData {
 };
 
 struct ComputePushConstants {
-    glm::vec4 data1;
-    glm::vec4 data2;
-    glm::vec4 data3;
-    glm::vec3 data4;
+    glm::mat4 viewMatrix;
     glm::uint32 time;
 };
 
@@ -71,8 +68,9 @@ public:
     bool _isInitialized{false};
     bool stop_rendering{false};
     int _frameNumber{0};
-    VkExtent2D _windowExtent{1920, 1080};
     struct SDL_Window *_window{nullptr};
+    VkExtent2D _windowExtent{1920, 1080};
+    VkExtent2D _requestedExtent{800, 600};
     DeletionQueue _mainDeletionQueue;
     VkInstance _instance;
     VkPhysicalDevice _chosenGPU;
@@ -121,12 +119,38 @@ public:
     GPUMeshBuffers rectangle; // hardcoded rectangle buffer
 
     std::vector<std::shared_ptr<MeshAsset>> _testMeshes;
+
+    std::chrono::high_resolution_clock::time_point lastTime;
     double totalTime = 0; // seconds
-    double totalFrames = 0;
+    uint64_t totalFrames = 0;
 
     GPUSceneData sceneData;
 
+    AllocatedImage _whiteImage;
+    AllocatedImage _blackImage;
+    AllocatedImage _greyImage;
+    AllocatedImage _errorCheckerboardImage;
+
+    VkSampler _defaultSamplerLinear;
+    VkSampler _defaultSamplerNearest;
+
+    VkDescriptorSetLayout _singleImageDescriptorLayout;
     VkDescriptorSetLayout _gpuSceneDataDescriptorLayout;
+
+    // Camera state
+    glm::vec3 cameraPos{0.0f, 0.0f, -5.0f};
+    float cameraSpeed = 5.0f; // units per second
+    
+    // Camera orientation
+    float pitch = 0.0f;    // Looking up/down
+    float yaw = 0.0f;      // Looking left/right
+    float mouseSensitivity = 0.1f;
+    bool mouseCaptured = false;
+    
+    // Camera vectors
+    glm::vec3 cameraFront{0.0f, 0.0f, 1.0f};  // Direction camera is facing
+    glm::vec3 cameraRight{1.0f, 0.0f, 0.0f};  // Right vector
+    glm::vec3 cameraUp{0.0f, 1.0f, 0.0f};     // Up vector
 
     bool resize_requested{false};
 
@@ -161,6 +185,7 @@ public:
 
     AllocatedImage create_image(VkExtent3D size, VkFormat format, VkImageUsageFlags usage, bool mipmapped=false);
     AllocatedImage create_image(void* data, VkExtent3D size, VkFormat format, VkImageUsageFlags usage, bool mipmapped=false);
+    void destroy_image(const AllocatedImage& img);
 
 private:
     void init_vulkan();
@@ -170,7 +195,7 @@ private:
     void create_swapchain(uint32_t width, uint32_t height);
     void resize_swapchain();
     void destroy_swapchain();
-    void init_desciptors();
+    void init_descriptors();
     void init_pipelines();
     void init_background_pipelines();
     void init_imgui();
